@@ -1,0 +1,10 @@
+worker_name: example_cpu_worker
+host: localhost
+port: 22
+username: testuser
+auth_method: key
+auth_credential: ~/.ssh/id_rsa
+remote_workdir: /tmp/jsling_test
+queue_name: normal
+worker_type: cpu
+ntasks_per_node: 4

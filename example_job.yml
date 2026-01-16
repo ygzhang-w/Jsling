@@ -1,0 +1,90 @@
+# Jsling Job Configuration Example
+# 使用方法: jsling job submit example_job.yml
+
+# ============ 必填字段 ============
+
+# 要执行的命令（支持多行命令）
+command: |
+  cd /path/to/project
+  source activate myenv
+  python train.py --epochs 100 --lr 0.001
+
+# 目标 Worker ID 或名称
+worker: gpu-cluster-1
+
+# ============ 资源配置 (可选) ============
+# 这些选项会覆盖 Worker 的默认资源配置
+
+# 节点数量
+nodes: 2
+
+# 每个节点的任务数
+ntasks_per_node: 4
+
+# GRES 资源配置 (例如: gpu:v100:2, gpu:a100:4)
+gres: gpu:v100:2
+
+# 每个任务使用的 GPU 数量
+gpus_per_task: 1
+
+# ============ 文件上传 (可选) ============
+# 需要上传到远程服务器的文件或目录列表
+
+upload:
+  - ./data/
+  - ./configs/train.yaml
+  - ./models/pretrained.pt
+
+# ============ 工作目录 (可选) ============
+# 本地工作目录，未指定时使用当前目录
+
+local_workdir: ./project/
+
+# ============ 同步配置 (可选) ============
+
+# Rsync 模式:
+#   - periodic: 定期同步（默认）
+#   - final_only: 仅在任务结束时同步
+rsync_mode: periodic
+
+# Rsync 同步间隔（秒），仅在 rsync_mode=periodic 时有效
+rsync_interval: 60
+
+# 额外的 rsync 选项
+rsync_options: --compress --exclude='*.tmp'
+
+# ============ 同步规则 (可选) ============
+# 定义哪些文件需要通过不同方式同步
+
+sync_rules:
+  # 流式同步规则（实时同步重要输出文件）
+  stream:
+    - type: suffix      # 按后缀匹配
+      pattern: .log
+    - type: suffix
+      pattern: .csv
+    - type: prefix      # 按前缀匹配
+      pattern: checkpoint_
+    - type: regex       # 正则表达式匹配
+      pattern: 'metrics_\d+\.json'
+
+  # Rsync 批量同步规则（定期批量同步）
+  rsync:
+    - type: suffix
+      pattern: .pt      # PyTorch 模型文件
+    - type: suffix
+      pattern: .ckpt    # Checkpoint 文件
+    - type: prefix
+      pattern: output_
+
+# ============ 最小配置示例 ============
+# 以下是一个最简单的 job 配置示例（仅包含必填字段）:
+#
+# command: python train.py
+# worker: my-worker
+#
+# ============ 多行命令示例 ============
+# command: |
+#   source ~/.bashrc
+#   conda activate ml
+#   python train.py --config config.yaml
