@@ -14,8 +14,8 @@ class WorkerConfig(BaseModel):
     host: str = Field(..., min_length=1, max_length=255)
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(..., min_length=1, max_length=100)
-    auth_method: str = Field(..., pattern="^(key|password)$")
-    auth_credential: str = Field(..., min_length=1)  # SSH key path or password
+    auth_method: str = Field(..., pattern="^key$")
+    auth_credential: str = Field(..., min_length=1)  # SSH key path
     remote_workdir: str = Field(..., min_length=1, max_length=500)
     queue_name: str = Field(..., min_length=1, max_length=100)
     worker_type: str = Field(..., pattern="^(cpu|gpu)$")
@@ -29,7 +29,6 @@ class WorkerConfig(BaseModel):
         """Validate auth_credential.
         
         For key method: path to SSH key file
-        For password method: the password string
         """
         if len(v) < 1:
             raise ValueError("auth_credential cannot be empty")

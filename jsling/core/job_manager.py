@@ -7,6 +7,8 @@ which runs as a persistent background process.
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import uuid
 from datetime import datetime
@@ -18,7 +20,6 @@ from sqlalchemy.orm import Session
 from jsling.connections.ssh_client import SSHClient
 from jsling.connections.worker import Worker as WorkerConnection
 from jsling.core.job_wrapper import JobWrapper
-from jsling.core.upload_manager import UploadManager
 from jsling.database.models import Job, Worker, Config
 from jsling.database.config import JSLING_HOME
 
@@ -155,12 +156,6 @@ class JobManager:
             worker_conn = WorkerConnection(worker)
             ssh_client = worker_conn.ssh_client
             
-            # Create remote working directory
-            upload_mgr = UploadManager(ssh_client, remote_workdir)
-            if not upload_mgr.create_remote_workdir():
-                print(f"Failed to create remote workdir")
-                return None
-            
             # Wrap command with JobWrapper
             wrapper = JobWrapper(
                 job_id=job_id,
@@ -171,20 +166,36 @@ class JobManager:
                 gres=gres,
                 gpus_per_task=gpus_per_task
             )
-            
-            # Get wrapped script content and upload directly (no local file)
             wrapped_content = wrapper.wrap_script()
-            if not upload_mgr.upload_script_content(wrapped_content):
-                print(f"Failed to upload script")
-                return None
             
-            # Upload additional files if specified
-            uploaded_files = []
-            if upload_files:
-                successful, failed = upload_mgr.upload_files(upload_files)
-                uploaded_files = successful
-                if failed:
-                    print(f"Warning: Failed to upload some files: {failed}")
+            uploaded_files: List[str] = []
+            
+            # Ensure remote workdir exists (rsync will create contents)
+            ssh_client.run(f"mkdir -p {remote_workdir}", hide=True, warn=True)
+            
+            # Use a temporary staging directory for initial upload
+            staging_dir = Path(tempfile.mkdtemp(prefix=f"jsling_upload_{job_id}_"))
+            try:
+                # Write wrapped script to staging directory
+                script_path = staging_dir / "job.sh"
+                script_path.write_text(wrapped_content)
+                script_path.chmod(0o755)
+                
+                # Stage additional upload files into staging directory
+                staged_successful, staged_failed = self._prepare_local_upload_files(staging_dir, upload_files)
+                uploaded_files = staged_successful
+                if staged_failed:
+                    print(f"Warning: Failed to stage some files for upload: {staged_failed}")
+                
+                # Upload staging directory to remote using rsync
+                if not self._rsync_initial_upload(worker, staging_dir, remote_workdir):
+                    print("Failed to upload files via rsync")
+                    return None
+            finally:
+                try:
+                    shutil.rmtree(staging_dir)
+                except Exception:
+                    pass
             
             # Submit job via sbatch
             remote_script = os.path.join(remote_workdir, "job.sh")
@@ -228,6 +239,114 @@ class JobManager:
             print(f"Error submitting job: {e}")
             self.session.rollback()
             return None
+    
+    def _prepare_local_upload_files(self, staging_dir: Path, upload_files: Optional[List[str]]) -> tuple[List[str], List[str]]:
+        """Prepare upload files in a local staging directory.
+        
+        Args:
+            staging_dir: Temporary staging directory path
+            upload_files: List of user-specified file or directory paths
+        
+        Returns:
+            Tuple of (successful_paths, failed_paths) based on original input strings.
+        """
+        successful: List[str] = []
+        failed: List[str] = []
+        if not upload_files:
+            return successful, failed
+        
+        for path in upload_files:
+            src = Path(path).expanduser()
+            if not src.exists():
+                failed.append(path)
+                continue
+            
+            dest = staging_dir / src.name
+            try:
+                if src.is_file():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+                elif src.is_dir():
+                    if dest.exists():
+                        shutil.copytree(src, dest, dirs_exist_ok=True)
+                    else:
+                        shutil.copytree(src, dest)
+                else:
+                    failed.append(path)
+                    continue
+                successful.append(path)
+            except Exception:
+                failed.append(path)
+        
+        return successful, failed
+    
+    def _build_rsync_ssh_command(self, worker: Worker) -> str:
+        """Build SSH command string for rsync based on worker configuration."""
+        from jsling.utils.encryption import decrypt_credential
+        
+        ssh_parts = ["ssh"]
+        
+        if worker.port and worker.port != 22:
+            ssh_parts.extend(["-p", str(worker.port)])
+        
+        if worker.auth_method == "key":
+            credential = decrypt_credential(worker.auth_credential)
+            key_path = os.path.expanduser(credential)
+            if os.path.exists(key_path):
+                ssh_parts.extend(["-i", key_path])
+        
+        ssh_parts.extend(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
+        
+        return " ".join(ssh_parts)
+    
+    def _rsync_initial_upload(self, worker: Worker, staging_dir: Path, remote_workdir: str) -> bool:
+        """Upload staged files to remote workdir using rsync.
+        
+        Args:
+            worker: Worker configuration
+            staging_dir: Local staging directory containing job.sh and upload files
+            remote_workdir: Remote working directory for this job
+        
+        Returns:
+            True if rsync command succeeded, False otherwise
+        """
+        local_path = f"{str(staging_dir)}/"
+        remote_path = f"{worker.username}@{worker.host}:{remote_workdir}/"
+        
+        ssh_cmd = self._build_rsync_ssh_command(worker)
+        rsync_cmd = [
+            "rsync",
+            "-avz",
+            "-e", ssh_cmd,
+            "--progress",
+            local_path,
+            remote_path,
+        ]
+        
+        env = os.environ.copy()
+        for proxy_var in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]:
+            env.pop(proxy_var, None)
+        
+        try:
+            result = subprocess.run(
+                rsync_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            print("Rsync timeout (5 minutes)")
+            return False
+        except Exception as e:
+            print(f"Rsync error: {e}")
+            return False
+        
+        if result.returncode != 0:
+            print(f"Rsync failed: {result.stderr}")
+            return False
+        
+        return True
     
     def _parse_slurm_job_id(self, sbatch_output: str) -> Optional[str]:
         """Parse Slurm job ID from sbatch command output."""
