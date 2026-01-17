@@ -178,8 +178,8 @@ class SSHClient:
             host: Remote host address
             username: SSH username
             port: SSH port
-            auth_method: Authentication method ('key' or 'password')
-            auth_credential: Encrypted credential
+            auth_method: Authentication method (only 'key' is supported)
+            auth_credential: Encrypted path to SSH key file
         """
         self.host = host
         self.username = username
@@ -250,15 +250,11 @@ class SSHClient:
             
             connect_kwargs: Dict[str, Any] = {}
             
-            if self.auth_method == "key":
-                # Use key file
-                key_path = Path(credential).expanduser()
-                if not key_path.exists():
-                    raise FileNotFoundError(f"SSH key file not found: {credential}")
-                connect_kwargs["key_filename"] = str(key_path)
-            else:
-                # Use password
-                connect_kwargs["password"] = credential
+            # Use key file authentication
+            key_path = Path(credential).expanduser()
+            if not key_path.exists():
+                raise FileNotFoundError(f"SSH key file not found: {credential}")
+            connect_kwargs["key_filename"] = str(key_path)
             
             self._connection = Connection(
                 host=self.host,
@@ -435,12 +431,10 @@ class SSHClient:
             'username': self.username,
         }
         
-        if self.auth_method == "key":
-            key_path = Path(credential).expanduser()
-            if key_path.exists():
-                connect_kwargs['key_filename'] = str(key_path)
-        else:
-            connect_kwargs['password'] = credential
+        # Use key file authentication
+        key_path = Path(credential).expanduser()
+        if key_path.exists():
+            connect_kwargs['key_filename'] = str(key_path)
         
         self._paramiko_client.connect(**connect_kwargs)
         logger.info(f"Paramiko connection established to {self.host}")

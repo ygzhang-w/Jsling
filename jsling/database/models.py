@@ -30,7 +30,7 @@ class Worker(Base):
     host: Mapped[str] = mapped_column(String(255), nullable=False)
     port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
     username: Mapped[str] = mapped_column(String(100), nullable=False)
-    auth_method: Mapped[str] = mapped_column(String(20), nullable=False)  # 'key' or 'password'
+    auth_method: Mapped[str] = mapped_column(String(20), nullable=False)  # 'key' only (password deprecated)
     auth_credential: Mapped[str] = mapped_column(Text, nullable=False)  # encrypted
     
     # Remote configuration

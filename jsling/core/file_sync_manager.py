@@ -2,7 +2,7 @@
 
 This module manages file synchronization for remote jobs:
 - Streaming sync: tail -f for real-time logs
-- Batch sync: SFTP/rsync for periodic or final-only bulk transfers
+- Batch sync: rsync for periodic or final-only bulk transfers
 
 Pattern syntax (glob-style):
 - '*'       : sync all files
@@ -39,7 +39,7 @@ class FileSyncManager:
     - Streaming sync: tail -f for real-time logs
       * Mandatory: Job output/error files ({job_id}.out, {job_id}.err) are always streamed
       * Optional: Additional patterns can be configured via sync_rules
-    - Batch sync: SFTP/rsync for bulk file transfers (patterns like '*.csv', '*')
+    - Batch sync: rsync for bulk file transfers (patterns like '*.csv', '*')
     - Conflict handling: Stream patterns take priority over download patterns
     
     Pattern syntax (glob-style):
@@ -305,12 +305,10 @@ class FileSyncManager:
                 'username': self.worker.username,
             }
             
-            if self.worker.auth_method == 'key':
-                key_path = os.path.expanduser(credential)
-                if os.path.exists(key_path):
-                    connect_kwargs['key_filename'] = key_path
-            else:
-                connect_kwargs['password'] = credential
+            # Use key file authentication
+            key_path = os.path.expanduser(credential)
+            if os.path.exists(key_path):
+                connect_kwargs['key_filename'] = key_path
             
             stream_client.connect(**connect_kwargs)
             
@@ -374,11 +372,6 @@ class FileSyncManager:
     
     def _execute_rsync(self):
         """Execute rsync command to download all files"""
-        # For password authentication, use SFTP instead of rsync
-        if self.worker.auth_method == 'password':
-            self._execute_sftp_sync()
-            return
-        
         try:
             # Build rsync command with proper SSH parameters
             # Handle IPv6 addresses - they need to be wrapped in brackets for rsync
@@ -388,7 +381,7 @@ class FileSyncManager:
             remote_path = f"{self.worker.username}@{host}:{self.job.remote_workdir}/"
             local_path = self.job.local_workdir
             
-            # Build SSH command with port and key/password
+            # Build SSH command with port and key
             ssh_cmd = self._build_rsync_ssh_command()
             
             # Exclude sentinel files, streaming files, uploaded files, and job.sh
@@ -436,85 +429,7 @@ class FileSyncManager:
         except Exception as e:
             logger.error(f"Rsync error: {e}")
     
-    def _execute_sftp_sync(self):
-        """Execute file sync via SFTP for password authentication."""
-        try:
-            # Get or create Paramiko SFTP client
-            if not self.ssh_client:
-                self.ssh_client = SSHClient(
-                    host=self.worker.host,
-                    username=self.worker.username,
-                    auth_method=self.worker.auth_method,
-                    auth_credential=self.worker.auth_credential,
-                    port=self.worker.port
-                )
-                self.ssh_client.connect()
-            
-            paramiko_client = self.ssh_client._get_paramiko_client()
-            sftp = paramiko_client.open_sftp()
-            
-            try:
-                # List remote files
-                self._sftp_download_dir(sftp, self.job.remote_workdir, self.job.local_workdir)
-                
-                # Update last rsync time
-                self.job.last_rsync_time = datetime.now()
-                self.session.commit()
-                logger.info(f"SFTP sync completed for job {self.job.job_id}")
-            finally:
-                sftp.close()
-                
-        except Exception as e:
-            logger.error(f"SFTP sync error: {e}")
-    
-    def _sftp_download_dir(self, sftp, remote_dir: str, local_dir: str, is_root: bool = True):
-        """Recursively download directory via SFTP.
-        
-        Args:
-            sftp: SFTP client
-            remote_dir: Remote directory path
-            local_dir: Local directory path
-            is_root: Whether this is the root directory (for relative path calculation)
-        """
-        import stat
-        
-        os.makedirs(local_dir, exist_ok=True)
-        
-        try:
-            for entry in sftp.listdir_attr(remote_dir):
-                remote_path = f"{remote_dir}/{entry.filename}"
-                local_path = os.path.join(local_dir, entry.filename)
-                
-                # Calculate relative path from remote workdir
-                rel_path = os.path.relpath(remote_path, self.job.remote_workdir)
-                
-                # Skip sentinel files
-                if entry.filename.startswith('.jsling_status_'):
-                    continue
-                
-                # Skip job.sh (system-generated submission script)
-                if entry.filename == 'job.sh':
-                    continue
-                
-                # Skip streaming files (use relative path for accurate matching)
-                if rel_path in self.streaming_files:
-                    continue
-                
-                if stat.S_ISDIR(entry.st_mode):
-                    # Recursive download subdirectory
-                    self._sftp_download_dir(sftp, remote_path, local_path, is_root=False)
-                else:
-                    # Check if this file should be downloaded
-                    if self._should_download_file(entry.filename, remote_path):
-                        try:
-                            sftp.get(remote_path, local_path)
-                            self.downloaded_files.add(rel_path)
-                            logger.debug(f"Downloaded {rel_path}")
-                        except Exception as e:
-                            logger.warning(f"Failed to download {remote_path}: {e}")
-        except Exception as e:
-            logger.error(f"Error listing directory {remote_dir}: {e}")
-    
+
     def _should_stream_file(self, filename: str, rel_path: str) -> bool:
         """Check if a file should be streamed based on stream patterns.
         
@@ -601,12 +516,11 @@ class FileSyncManager:
         if self.worker.port and self.worker.port != 22:
             ssh_parts.extend(['-p', str(self.worker.port)])
         
-        # Add key file or use sshpass for password
-        if self.worker.auth_method == 'key':
-            credential = decrypt_credential(self.worker.auth_credential)
-            key_path = os.path.expanduser(credential)
-            if os.path.exists(key_path):
-                ssh_parts.extend(['-i', key_path])
+        # Add key file for authentication
+        credential = decrypt_credential(self.worker.auth_credential)
+        key_path = os.path.expanduser(credential)
+        if os.path.exists(key_path):
+            ssh_parts.extend(['-i', key_path])
         
         # Disable strict host key checking for automation
         ssh_parts.extend(['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null'])

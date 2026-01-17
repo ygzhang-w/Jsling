@@ -63,19 +63,7 @@ class TestSSHClientGetSSHCommandArgs:
         key_index = args.index("-i")
         assert args[key_index + 1] == "/path/to/key"
     
-    def test_ssh_command_with_password_auth(self):
-        """Test SSH command with password auth doesn't include -i."""
-        client = SSHClient(
-            host="example.com",
-            username="testuser",
-            port=22,
-            auth_method="password",
-            auth_credential="encrypted_password"
-        )
-        
-        args = client.get_ssh_command_args()
-        
-        assert "-i" not in args
+
     
     def test_ssh_command_with_extra_args(self):
         """Test SSH command with extra arguments."""

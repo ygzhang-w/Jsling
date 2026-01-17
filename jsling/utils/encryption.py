@@ -46,7 +46,7 @@ def _get_or_create_key() -> bytes:
 
 
 def encrypt_credential(credential: str) -> str:
-    """Encrypt a credential (password or key path).
+    """Encrypt a credential (SSH key path).
     
     Args:
         credential: Plain text credential
