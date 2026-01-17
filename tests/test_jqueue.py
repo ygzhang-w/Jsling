@@ -458,4 +458,115 @@ class TestJQueueCleanup:
         result = runner.invoke(main, ['cleanup', '-s', 'cancelled', '-f'])
         
         assert "No jobs found with status: cancelled" in result.output
-
+    
+    @patch('jsling.commands.jqueue.get_db')
+    @patch('shutil.rmtree')
+    @patch('os.path.exists')
+    def test_cleanup_with_local_flag(self, mock_exists, mock_rmtree, mock_get_db, temp_db, cancelled_job):
+        """Test cleanup with --local flag deletes local directories."""
+        cancelled_id = cancelled_job.job_id
+        local_dir = cancelled_job.local_workdir
+        mock_get_db.return_value = temp_db
+        mock_exists.return_value = True
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'cancelled', '-l', '-f'])
+        
+        assert "Cleaned up 1 job(s)" in result.output
+        assert "Local dirs deleted: 1" in result.output
+        # Verify shutil.rmtree was called with the local workdir
+        mock_rmtree.assert_called_once_with(local_dir)
+        # Job should be deleted from DB
+        assert temp_db.query(Job).filter(Job.job_id == cancelled_id).first() is None
+    
+    @patch('jsling.commands.jqueue.get_db')
+    @patch('shutil.rmtree')
+    @patch('os.path.exists')
+    def test_cleanup_local_dir_not_exists(self, mock_exists, mock_rmtree, mock_get_db, temp_db, cancelled_job):
+        """Test cleanup with --local flag handles non-existent directories gracefully."""
+        mock_get_db.return_value = temp_db
+        mock_exists.return_value = False
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'cancelled', '-l', '-f'])
+        
+        assert "Cleaned up 1 job(s)" in result.output
+        assert "Local dirs deleted: 1" in result.output
+        # rmtree should not be called if directory doesn't exist
+        mock_rmtree.assert_not_called()
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_specific_job_id(self, mock_get_db, temp_db, cancelled_job, pending_job):
+        """Test cleanup with specific job_id cleans only that job."""
+        cancelled_id = cancelled_job.job_id
+        pending_id = pending_job.job_id
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', cancelled_id, '-f'])
+        
+        assert "Found 1 job(s) to clean" in result.output
+        assert "Cleaned up 1 job(s)" in result.output
+        # Cancelled job should be deleted
+        assert temp_db.query(Job).filter(Job.job_id == cancelled_id).first() is None
+        # Pending job should still exist
+        assert temp_db.query(Job).filter(Job.job_id == pending_id).first() is not None
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_multiple_job_ids(self, mock_get_db, temp_db, cancelled_job, failed_job, pending_job):
+        """Test cleanup with multiple job_ids."""
+        cancelled_id = cancelled_job.job_id
+        failed_id = failed_job.job_id
+        pending_id = pending_job.job_id
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', cancelled_id, failed_id, '-f'])
+        
+        assert "Found 2 job(s) to clean" in result.output
+        assert "Cleaned up 2 job(s)" in result.output
+        # Both jobs should be deleted
+        assert temp_db.query(Job).filter(Job.job_id == cancelled_id).first() is None
+        assert temp_db.query(Job).filter(Job.job_id == failed_id).first() is None
+        # Pending job should still exist
+        assert temp_db.query(Job).filter(Job.job_id == pending_id).first() is not None
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_job_id_not_found(self, mock_get_db, temp_db, sample_worker):
+        """Test cleanup with non-existent job_id shows warning."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', 'nonexistent_job_id', '-f'])
+        
+        assert "Warning: Job not found: nonexistent_job_id" in result.output
+        assert "No jobs to clean up" in result.output
+    
+    @patch('jsling.commands.jqueue.get_db')
+    @patch('jsling.core.job_manager.JobManager.queue_cancel_job')
+    def test_cleanup_running_job_queues_cancellation(self, mock_queue_cancel, mock_get_db, temp_db, sample_worker):
+        """Test cleanup with running job queues cancellation first."""
+        # Create a running job
+        running_job = Job(
+            job_id="running_001",
+            slurm_job_id="99999",
+            worker_id=sample_worker.worker_id,
+            local_workdir="/tmp/jobs/running_001",
+            remote_workdir="/scratch/jobs/running_001",
+            script_path="",
+            command="echo running",
+            job_status="running",
+            sync_mode="both",
+            submit_time=datetime.now()
+        )
+        temp_db.add(running_job)
+        temp_db.commit()
+        
+        mock_get_db.return_value = temp_db
+        mock_queue_cancel.return_value = True
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', 'running_001', '-f'])
+        
+        assert "Queued for cancellation: running_001" in result.output
+        mock_queue_cancel.assert_called_once_with("running_001")
