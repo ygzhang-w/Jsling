@@ -1,7 +1,7 @@
 """Tests for jqueue command."""
 
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -321,3 +321,141 @@ class TestJQueueHelp:
         assert "Query job queue status" in result.output
         assert "--all" in result.output or "-a" in result.output
         assert "--filter" in result.output or "-f" in result.output
+
+
+class TestJQueueCleanup:
+    """Test cases for jqueue cleanup command."""
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_no_jobs_to_clean(self, mock_get_db, temp_db, sample_worker):
+        """Test cleanup with no jobs to clean."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-f'])
+        
+        assert "No jobs to clean up" in result.output
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_by_status_cancelled(self, mock_get_db, temp_db, cancelled_job, pending_job):
+        """Test cleanup only cancelled jobs."""
+        cancelled_id = cancelled_job.job_id
+        pending_id = pending_job.job_id
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'cancelled', '-f'])
+        
+        assert "Cleaned up 1 job(s)" in result.output
+        # Cancelled job should be deleted
+        assert temp_db.query(Job).filter(Job.job_id == cancelled_id).first() is None
+        # Pending job should still exist
+        assert temp_db.query(Job).filter(Job.job_id == pending_id).first() is not None
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_by_status_failed(self, mock_get_db, temp_db, failed_job, pending_job):
+        """Test cleanup only failed jobs."""
+        failed_id = failed_job.job_id
+        pending_id = pending_job.job_id
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'failed', '-f'])
+        
+        assert "Cleaned up 1 job(s)" in result.output
+        # Failed job should be deleted
+        assert temp_db.query(Job).filter(Job.job_id == failed_id).first() is None
+        # Pending job should still exist
+        assert temp_db.query(Job).filter(Job.job_id == pending_id).first() is not None
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_by_multiple_statuses(self, mock_get_db, temp_db, cancelled_job, failed_job, pending_job):
+        """Test cleanup multiple statuses using comma-separated format."""
+        cancelled_id = cancelled_job.job_id
+        failed_id = failed_job.job_id
+        pending_id = pending_job.job_id
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'failed,cancelled', '-f'])
+        
+        assert "Cleaned up 2 job(s)" in result.output
+        # Both jobs should be deleted
+        assert temp_db.query(Job).filter(Job.job_id == cancelled_id).first() is None
+        assert temp_db.query(Job).filter(Job.job_id == failed_id).first() is None
+        # Pending job should still exist
+        assert temp_db.query(Job).filter(Job.job_id == pending_id).first() is not None
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_dry_run(self, mock_get_db, temp_db, cancelled_job):
+        """Test dry-run shows jobs but doesn't delete them."""
+        cancelled_id = cancelled_job.job_id
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'cancelled', '-n'])
+        
+        assert "Dry-run mode" in result.output
+        assert "Would delete" in result.output
+        assert cancelled_id in result.output
+        # Job should NOT be deleted
+        assert temp_db.query(Job).filter(Job.job_id == cancelled_id).first() is not None
+    
+    @patch('jsling.commands.jqueue.get_db')
+    @patch('jsling.connections.worker.Worker')
+    def test_cleanup_with_remote_flag(self, mock_worker_conn, mock_get_db, temp_db, cancelled_job):
+        """Test cleanup with --remote flag calls SSH to delete remote dir."""
+        cancelled_id = cancelled_job.job_id
+        mock_get_db.return_value = temp_db
+        
+        # Mock the SSH client
+        mock_ssh = MagicMock()
+        mock_ssh.run.return_value = MagicMock(ok=True)
+        mock_worker_instance = MagicMock()
+        mock_worker_instance.test_connection.return_value = True
+        mock_worker_instance.ssh_client = mock_ssh
+        mock_worker_conn.return_value = mock_worker_instance
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'cancelled', '-r', '-f'])
+        
+        assert "Cleaned up 1 job(s)" in result.output
+        assert "Remote dirs deleted: 1" in result.output
+        # Verify SSH rm -rf was called
+        mock_ssh.run.assert_called()
+        call_args = mock_ssh.run.call_args[0][0]
+        assert "rm -rf" in call_args
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_no_force_requires_confirmation(self, mock_get_db, temp_db, cancelled_job):
+        """Test cleanup without --force requires confirmation."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        # Simulate user typing 'n' (no) at the prompt
+        result = runner.invoke(main, ['cleanup', '-s', 'cancelled'], input='n\n')
+        
+        assert "Cleanup cancelled" in result.output
+        # Job should still exist since we cancelled
+        assert temp_db.query(Job).filter(Job.job_id == cancelled_job.job_id).first() is not None
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_invalid_status_warning(self, mock_get_db, temp_db, sample_worker):
+        """Test cleanup with invalid status shows warning."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'invalid_status', '-f'])
+        
+        assert "Invalid status 'invalid_status'" in result.output
+    
+    @patch('jsling.commands.jqueue.get_db')
+    def test_cleanup_no_jobs_with_status(self, mock_get_db, temp_db, pending_job):
+        """Test cleanup when no jobs match the specified status."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, ['cleanup', '-s', 'cancelled', '-f'])
+        
+        assert "No jobs found with status: cancelled" in result.output
+

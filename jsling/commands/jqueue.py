@@ -195,56 +195,194 @@ def main(ctx, show_all, show_pending, filters, sync, limit, sort):
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
-def cleanup():
-    """Clean up terminated jobs."""
+@click.option("--status", "-s", "statuses", multiple=True, 
+              help="Filter by status (comma-separated or multiple -s flags). Valid: completed, failed, cancelled, submission_failed")
+@click.option("--remote", "-r", "cleanup_remote", is_flag=True, 
+              help="Also delete remote work directories via SSH")
+@click.option("--dry-run", "-n", is_flag=True, 
+              help="Show what would be deleted without deleting")
+@click.option("--force", "-f", is_flag=True, 
+              help="Skip confirmation prompt")
+def cleanup(statuses, cleanup_remote, dry_run, force):
+    """Clean up terminated jobs.
+    
+    By default, cleans up completed jobs older than configured threshold
+    and jobs marked for deletion (previously displayed failed/cancelled).
+    
+    \b
+    Examples:
+      jqueue cleanup                    # Default cleanup
+      jqueue cleanup -s failed          # Clean only failed jobs
+      jqueue cleanup -s failed,cancelled  # Clean failed and cancelled
+      jqueue cleanup -s cancelled --remote  # Also delete remote dirs
+      jqueue cleanup -n                 # Dry-run (show what would be deleted)
+    """
+    from jsling.database.models import Job
+    from jsling.core.config_manager import ConfigManager
+    from jsling.connections.worker import Worker as WorkerConnection
+    
     session = get_db()
-    job_manager = JobManager(session)
     
     try:
-        from jsling.database.models import Job
-        from jsling.core.config_manager import ConfigManager
-        
         config_manager = ConfigManager(session)
         
-        # Get cleanup config
-        completed_days = int(config_manager.get('cleanup_completed_days') or '1')
-        keep_local = (config_manager.get('cleanup_keep_local') or 'false').lower() == 'true'
+        # Parse statuses (support comma-separated and multiple flags)
+        valid_statuses = {'completed', 'failed', 'cancelled', 'submission_failed'}
+        target_statuses = set()
         
-        # Find jobs to clean
-        cutoff_time = datetime.now() - timedelta(days=completed_days)
+        for status_arg in statuses:
+            for s in status_arg.split(','):
+                s = s.strip().lower()
+                if s:
+                    if s in valid_statuses:
+                        target_statuses.add(s)
+                    else:
+                        console.print(f"[yellow]Warning: Invalid status '{s}', valid: {', '.join(sorted(valid_statuses))}[/yellow]")
         
-        # Completed jobs older than cutoff
-        completed_jobs = session.query(Job).filter(
-            Job.job_status == 'completed',
-            Job.end_time < cutoff_time
-        ).all()
+        # Build query based on options
+        if target_statuses:
+            # User specified statuses - clean all matching jobs
+            jobs_query = session.query(Job).filter(Job.job_status.in_(target_statuses))
+        else:
+            # Default behavior: completed older than threshold + marked_for_deletion
+            completed_days = int(config_manager.get('cleanup_completed_days') or '1')
+            cutoff_time = datetime.now() - timedelta(days=completed_days)
+            
+            # Completed jobs older than cutoff
+            completed_jobs = session.query(Job).filter(
+                Job.job_status == 'completed',
+                Job.end_time < cutoff_time
+            ).all()
+            
+            # Failed/cancelled jobs marked for deletion
+            marked_jobs = session.query(Job).filter(
+                Job.marked_for_deletion == True
+            ).all()
+            
+            jobs_to_clean = completed_jobs + marked_jobs
+            
+            if not jobs_to_clean:
+                console.print("[yellow]No jobs to clean up[/yellow]")
+                return
+            
+            # Show what will be cleaned
+            console.print(f"[cyan]Found {len(jobs_to_clean)} job(s) to clean:[/cyan]")
+            console.print(f"  - Completed (>{completed_days}d): {len(completed_jobs)}")
+            console.print(f"  - Marked for deletion: {len(marked_jobs)}")
+            
+            if dry_run:
+                console.print("\n[yellow]Dry-run mode - no changes made[/yellow]")
+                for job in jobs_to_clean:
+                    console.print(f"  Would delete: {job.job_id} ({job.job_status})")
+                    if cleanup_remote:
+                        console.print(f"    Remote dir: {job.remote_workdir}")
+                return
+            
+            if not force and not click.confirm("Proceed with cleanup?"):
+                console.print("[yellow]Cleanup cancelled[/yellow]")
+                return
+            
+            # Perform cleanup
+            _perform_cleanup(session, jobs_to_clean, cleanup_remote, console)
+            return
         
-        # Failed/cancelled jobs marked for deletion
-        marked_jobs = session.query(Job).filter(
-            Job.marked_for_deletion == True
-        ).all()
+        # For status-filtered cleanup
+        jobs_to_clean = jobs_query.all()
         
-        total_cleaned = 0
+        if not jobs_to_clean:
+            console.print(f"[yellow]No jobs found with status: {', '.join(sorted(target_statuses))}[/yellow]")
+            return
         
-        for job in completed_jobs + marked_jobs:
-            try:
-                # TODO: Stop sync process if running
-                # TODO: Delete remote workdir via SSH
-                # TODO: Delete local workdir if not keep_local
-                
-                session.delete(job)
-                total_cleaned += 1
-            except Exception as e:
-                console.print(f"[red]Failed to clean job {job.job_id}: {e}[/red]")
+        console.print(f"[cyan]Found {len(jobs_to_clean)} job(s) to clean with status: {', '.join(sorted(target_statuses))}[/cyan]")
         
-        session.commit()
-        console.print(f"[green]Cleaned up {total_cleaned} jobs[/green]")
-        console.print(f"  - Completed (>{completed_days}d): {len(completed_jobs)}")
-        console.print(f"  - Marked for deletion: {len(marked_jobs)}")
+        if dry_run:
+            console.print("\n[yellow]Dry-run mode - no changes made[/yellow]")
+            for job in jobs_to_clean:
+                console.print(f"  Would delete: {job.job_id} ({job.job_status})")
+                if cleanup_remote:
+                    console.print(f"    Remote dir: {job.remote_workdir}")
+            return
+        
+        if not force and not click.confirm("Proceed with cleanup?"):
+            console.print("[yellow]Cleanup cancelled[/yellow]")
+            return
+        
+        _perform_cleanup(session, jobs_to_clean, cleanup_remote, console)
         
     finally:
         session.close()
 
 
+def _perform_cleanup(session, jobs_to_clean, cleanup_remote, console):
+    """Perform the actual cleanup of jobs.
+    
+    Args:
+        session: Database session
+        jobs_to_clean: List of Job objects to clean
+        cleanup_remote: Whether to delete remote directories
+        console: Rich console for output
+    """
+    from jsling.connections.worker import Worker as WorkerConnection
+    
+    total_cleaned = 0
+    remote_cleaned = 0
+    remote_failed = 0
+    
+    # Group jobs by worker for efficient SSH connections
+    jobs_by_worker = {}
+    for job in jobs_to_clean:
+        if job.worker_id not in jobs_by_worker:
+            jobs_by_worker[job.worker_id] = []
+        jobs_by_worker[job.worker_id].append(job)
+    
+    for worker_id, jobs in jobs_by_worker.items():
+        worker_conn = None
+        
+        try:
+            if cleanup_remote:
+                # Get worker and establish connection
+                worker = jobs[0].worker
+                if worker:
+                    worker_conn = WorkerConnection(worker)
+                    if not worker_conn.test_connection():
+                        console.print(f"[yellow]Warning: Cannot connect to worker {worker_id}, skipping remote cleanup[/yellow]")
+                        worker_conn = None
+            
+            for job in jobs:
+                try:
+                    # Delete remote directory if requested
+                    if cleanup_remote and worker_conn and job.remote_workdir:
+                        result = worker_conn.ssh_client.run(
+                            f"rm -rf {job.remote_workdir}",
+                            hide=True,
+                            warn=True
+                        )
+                        if result.ok:
+                            remote_cleaned += 1
+                        else:
+                            remote_failed += 1
+                            console.print(f"[yellow]Warning: Failed to delete remote dir for {job.job_id}[/yellow]")
+                    
+                    # Delete job record
+                    session.delete(job)
+                    total_cleaned += 1
+                    
+                except Exception as e:
+                    console.print(f"[red]Failed to clean job {job.job_id}: {e}[/red]")
+        
+        finally:
+            if worker_conn:
+                worker_conn.close()
+    
+    session.commit()
+    
+    console.print(f"\n[green]Cleaned up {total_cleaned} job(s)[/green]")
+    if cleanup_remote:
+        console.print(f"  - Remote dirs deleted: {remote_cleaned}")
+        if remote_failed > 0:
+            console.print(f"  - Remote dir failures: {remote_failed}")
+
+
 if __name__ == "__main__":
     main()
+
