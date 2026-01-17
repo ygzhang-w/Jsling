@@ -200,6 +200,39 @@ class SSHClient:
             return decrypt_credential(self._encrypted_credential)
         return ""
     
+    def get_ssh_command_args(self, extra_args: list = None) -> list:
+        """Get SSH command arguments for interactive session.
+        
+        This is used when you need to spawn an actual SSH process
+        (e.g., for interactive login) rather than using Fabric/Paramiko.
+        
+        Args:
+            extra_args: Additional SSH arguments to include (e.g., ["-t", "cd /dir && bash"])
+            
+        Returns:
+            List of SSH command arguments (e.g., ["ssh", "-p", "22", "-i", "key", "user@host"])
+        """
+        args = ["ssh"]
+        
+        # Add port if not default
+        if self.port and self.port != 22:
+            args.extend(["-p", str(self.port)])
+        
+        # Add key file if using key auth
+        if self.auth_method == "key" and self._encrypted_credential:
+            credential = self._get_credential()
+            if credential:
+                args.extend(["-i", credential])
+        
+        # Add user@host
+        args.append(f"{self.username}@{self.host}")
+        
+        # Add extra arguments
+        if extra_args:
+            args.extend(extra_args)
+        
+        return args
+    
     def connect(self) -> Connection:
         """Establish SSH connection.
         

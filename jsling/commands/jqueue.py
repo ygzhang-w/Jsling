@@ -48,17 +48,56 @@ def parse_filter(filter_values: Tuple[str, ...]) -> dict:
     return result
 
 
+def _ssh_login_to_job(job_id: str) -> None:
+    """Open an SSH session to the job's remote work directory.
+    
+    Args:
+        job_id: The job ID to login to
+    """
+    import os
+    from jsling.database.models import Job
+    from jsling.connections.worker import Worker as WorkerConnection
+    
+    session = get_db()
+    try:
+        # Find job (support partial ID match)
+        job = session.query(Job).filter(Job.job_id.like(f"{job_id}%")).first()
+        if not job:
+            console.print(f"[red]Error: Job '{job_id}' not found[/red]")
+            return
+        
+        if not job.worker:
+            console.print(f"[red]Error: Worker not found for job '{job.job_id}'[/red]")
+            return
+        
+        remote_dir = job.remote_workdir
+        if not remote_dir:
+            console.print(f"[red]Error: No remote work directory for job '{job.job_id}'[/red]")
+            return
+        
+        # Use Worker abstraction to get login command
+        worker_conn = WorkerConnection(job.worker)
+        ssh_args = worker_conn.get_login_command(directory=remote_dir)
+        
+        console.print(f"[cyan]Connecting to {job.worker.host}:{remote_dir}...[/cyan]")
+        
+        # Replace current process with SSH
+        os.execvp("ssh", ssh_args)
+        
+    finally:
+        session.close()
+
 @click.group(invoke_without_command=True, context_settings=CONTEXT_SETTINGS)
 @click.pass_context
 @click.option("--all", "-a", "show_all", is_flag=True, help="Show all jobs including previously displayed failed/cancelled jobs")
-@click.option("--pending", "-p", "show_pending", is_flag=True, help="Show only queued jobs waiting for submission")
 @click.option("--filter", "-f", "filters", multiple=True, 
               help="Filter jobs by key=value (e.g. -f worker=node1 -f status=running)")
 @click.option("--sync", "-S", is_flag=True, help="Manually sync job status (normally handled by runner daemon)")
 @click.option("--limit", "-n", type=int, help="Limit number of results")
 @click.option("--sort", type=click.Choice(['submit_time', 'job_id']), default='submit_time', 
               help="Sort by field")
-def main(ctx, show_all, show_pending, filters, sync, limit, sort):
+@click.option("--login", "-l", "login_job_id", type=str, help="Open SSH session to job's remote work directory")
+def main(ctx, show_all, filters, sync, limit, sort, login_job_id):
     """Query job queue status.
     
     By default, failed/cancelled jobs are shown only once. Use --all to show all jobs.
@@ -81,9 +120,14 @@ def main(ctx, show_all, show_pending, filters, sync, limit, sort):
       jqueue -f worker=node1                      # Filter by worker ID
       jqueue -f status=running                    # Filter by status
       jqueue -f worker=node1 -f status=pending    # Combined filters
-      jqueue --pending                            # Show submission queue
+      jqueue -f status=queued                     # Show submission queue
     """
     if ctx.invoked_subcommand is None:
+        # Handle --login option: SSH into job's remote work directory
+        if login_job_id:
+            _ssh_login_to_job(login_job_id)
+            return
+        
         # Main command - list jobs
         session = get_db()
         job_manager = JobManager(session)
@@ -106,16 +150,13 @@ def main(ctx, show_all, show_pending, filters, sync, limit, sort):
             query = session.query(Job)
             
             # Apply filters
-            if show_pending:
-                # Show only queued jobs (submission queue)
-                query = query.filter(Job.job_status == "queued")
-            elif worker_id:
+            if worker_id:
                 query = query.filter(Job.worker_id == worker_id)
             if status_filter:
                 query = query.filter(Job.job_status == status_filter)
             
             # If not showing all and no specific filter, apply default filtering
-            if not show_all and not status_filter and not show_pending:
+            if not show_all and not status_filter:
                 # Show: queued, pending, running, completed, 
                 # AND failed/cancelled/submission_failed that haven't been displayed yet
                 query = query.filter(

@@ -77,6 +77,22 @@ class Worker:
         
         return True, "Validation successful"
     
+    def get_login_command(self, directory: str = None) -> list:
+        """Get SSH command for interactive login to worker.
+        
+        Args:
+            directory: Optional directory to cd into after login
+            
+        Returns:
+            List of command arguments for os.execvp
+        """
+        extra_args = None
+        if directory:
+            # Use -t for pseudo-terminal, cd to directory and start login shell
+            extra_args = ["-t", f"cd {directory} && exec $SHELL -l"]
+        
+        return self.ssh_client.get_ssh_command_args(extra_args=extra_args)
+    
     def close(self):
         """Close SSH connection."""
         if self._ssh_client:
