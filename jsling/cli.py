@@ -37,14 +37,14 @@ def main():
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation and always clear database")
-def init(yes):
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation and always clear database")
+def init(force):
     """Initialize Jsling database and configurations.
     
     This command will clear the entire database if it already exists.
     """
     try:
-        if not yes and DB_PATH.exists():
+        if not force and DB_PATH.exists():
             if not click.confirm(f"Database at {DB_PATH} already exists. Clear and re-initialize?"):
                 console.print("[yellow]Aborted[/yellow]")
                 return
@@ -234,11 +234,11 @@ def worker_test(worker_id):
 
 @worker.command("remove", context_settings=CONTEXT_SETTINGS)
 @click.argument("worker_id")
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
-def worker_remove(worker_id, yes):
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation")
+def worker_remove(worker_id, force):
     """Remove a worker."""
     try:
-        if not yes:
+        if not force:
             if not click.confirm(f"Are you sure you want to remove worker '{worker_id}'?"):
                 console.print("[yellow]Aborted[/yellow]")
                 return

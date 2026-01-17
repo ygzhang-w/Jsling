@@ -432,74 +432,24 @@ def _perform_cleanup(session, jobs_to_clean, cleanup_remote, cleanup_local, cons
         cleanup_local: Whether to delete local directories
         console: Rich console for output
     """
-    from jsling.connections.worker import Worker as WorkerConnection
-    import shutil
-    import os
+    from jsling.utils.workdir_cleanup import delete_workdirs
     
+    # Delete work directories using shared utility
+    if cleanup_remote or cleanup_local:
+        remote_cleaned, remote_failed, local_cleaned, local_failed = delete_workdirs(
+            jobs_to_clean, cleanup_remote, cleanup_local, console, verbose=False
+        )
+    else:
+        remote_cleaned = remote_failed = local_cleaned = local_failed = 0
+    
+    # Delete job records
     total_cleaned = 0
-    remote_cleaned = 0
-    remote_failed = 0
-    local_cleaned = 0
-    local_failed = 0
-    
-    # Group jobs by worker for efficient SSH connections
-    jobs_by_worker = {}
     for job in jobs_to_clean:
-        if job.worker_id not in jobs_by_worker:
-            jobs_by_worker[job.worker_id] = []
-        jobs_by_worker[job.worker_id].append(job)
-    
-    for worker_id, jobs in jobs_by_worker.items():
-        worker_conn = None
-        
         try:
-            if cleanup_remote:
-                # Get worker and establish connection
-                worker = jobs[0].worker
-                if worker:
-                    worker_conn = WorkerConnection(worker)
-                    if not worker_conn.test_connection():
-                        console.print(f"[yellow]Warning: Cannot connect to worker {worker_id}, skipping remote cleanup[/yellow]")
-                        worker_conn = None
-            
-            for job in jobs:
-                try:
-                    # Delete remote directory if requested
-                    if cleanup_remote and worker_conn and job.remote_workdir:
-                        result = worker_conn.ssh_client.run(
-                            f"rm -rf {job.remote_workdir}",
-                            hide=True,
-                            warn=True
-                        )
-                        if result.ok:
-                            remote_cleaned += 1
-                        else:
-                            remote_failed += 1
-                            console.print(f"[yellow]Warning: Failed to delete remote dir for {job.job_id}[/yellow]")
-                    
-                    # Delete local directory if requested
-                    if cleanup_local and job.local_workdir:
-                        try:
-                            if os.path.exists(job.local_workdir):
-                                shutil.rmtree(job.local_workdir)
-                                local_cleaned += 1
-                            else:
-                                # Directory doesn't exist, still count as cleaned
-                                local_cleaned += 1
-                        except Exception as e:
-                            local_failed += 1
-                            console.print(f"[yellow]Warning: Failed to delete local dir for {job.job_id}: {e}[/yellow]")
-                    
-                    # Delete job record
-                    session.delete(job)
-                    total_cleaned += 1
-                    
-                except Exception as e:
-                    console.print(f"[red]Failed to clean job {job.job_id}: {e}[/red]")
-        
-        finally:
-            if worker_conn:
-                worker_conn.close()
+            session.delete(job)
+            total_cleaned += 1
+        except Exception as e:
+            console.print(f"[red]Failed to delete job record {job.job_id}: {e}[/red]")
     
     session.commit()
     

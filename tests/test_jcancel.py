@@ -242,6 +242,102 @@ class TestJCancelHelp:
         
         assert result.exit_code == 0
         assert "Cancel one or more jobs" in result.output
-        # --yes and --sync are removed, should not appear in help
+        # New options should appear in help
+        assert "--remote" in result.output
+        assert "--local" in result.output
+        assert "--force" in result.output
+        # Old options should not appear
         assert "--yes" not in result.output
         assert "--sync" not in result.output
+
+
+class TestJCancelWorkdirDeletion:
+    """Test cases for jcancel workdir deletion options."""
+    
+    @patch('jsling.commands.jcancel.get_db')
+    @patch('jsling.commands.jcancel._delete_workdirs')
+    def test_cancel_with_remote_flag(self, mock_delete_workdirs, mock_get_db, temp_db, sample_job):
+        """Test jcancel with --remote flag triggers workdir deletion."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, [sample_job.job_id, "--remote", "-f"])
+        
+        # Workdir deletion should be called
+        assert mock_delete_workdirs.called
+        call_args = mock_delete_workdirs.call_args
+        assert call_args[0][2] is True  # cleanup_remote
+        assert call_args[0][3] is False  # cleanup_local
+        assert call_args[0][4] is True  # force
+    
+    @patch('jsling.commands.jcancel.get_db')
+    @patch('jsling.commands.jcancel._delete_workdirs')
+    def test_cancel_with_local_flag(self, mock_delete_workdirs, mock_get_db, temp_db, sample_job):
+        """Test jcancel with --local flag triggers workdir deletion."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, [sample_job.job_id, "--local", "-f"])
+        
+        # Workdir deletion should be called
+        assert mock_delete_workdirs.called
+        call_args = mock_delete_workdirs.call_args
+        assert call_args[0][2] is False  # cleanup_remote
+        assert call_args[0][3] is True  # cleanup_local
+        assert call_args[0][4] is True  # force
+    
+    @patch('jsling.commands.jcancel.get_db')
+    @patch('jsling.commands.jcancel._delete_workdirs')
+    def test_cancel_with_both_remote_and_local(self, mock_delete_workdirs, mock_get_db, temp_db, sample_job):
+        """Test jcancel with both --remote and --local flags."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, [sample_job.job_id, "-r", "-l", "-f"])
+        
+        # Workdir deletion should be called
+        assert mock_delete_workdirs.called
+        call_args = mock_delete_workdirs.call_args
+        assert call_args[0][2] is True  # cleanup_remote
+        assert call_args[0][3] is True  # cleanup_local
+        assert call_args[0][4] is True  # force
+    
+    @patch('jsling.commands.jcancel.get_db')
+    @patch('jsling.commands.jcancel._delete_workdirs')
+    def test_cancel_without_cleanup_flags(self, mock_delete_workdirs, mock_get_db, temp_db, sample_job):
+        """Test jcancel without cleanup flags does not trigger workdir deletion."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        result = runner.invoke(main, [sample_job.job_id])
+        
+        # Workdir deletion should NOT be called
+        assert not mock_delete_workdirs.called
+    
+    @patch('jsling.commands.jcancel.get_db')
+    def test_cancel_with_confirmation_prompt(self, mock_get_db, temp_db, sample_job):
+        """Test jcancel prompts for confirmation when deleting workdirs without -f."""
+        mock_get_db.return_value = temp_db
+        
+        runner = CliRunner()
+        # Answer 'n' to the confirmation prompt
+        result = runner.invoke(main, [sample_job.job_id, "--local"], input="n\n")
+        
+        assert "Proceed with directory deletion and job removal?" in result.output
+        assert "Cleanup cancelled" in result.output
+    
+    @patch('jsling.commands.jcancel.get_db')
+    @patch('shutil.rmtree')
+    @patch('os.path.exists')
+    def test_cancel_local_deletion_with_force(self, mock_exists, mock_rmtree, mock_get_db, temp_db, sample_job):
+        """Test jcancel with --local -f deletes local directory without confirmation."""
+        mock_get_db.return_value = temp_db
+        mock_exists.return_value = True
+        
+        runner = CliRunner()
+        result = runner.invoke(main, [sample_job.job_id, "--local", "-f"])
+        
+        # Should not prompt for confirmation
+        assert "Proceed with directory deletion and job removal?" not in result.output
+        # Local dir should be deleted
+        mock_rmtree.assert_called()
