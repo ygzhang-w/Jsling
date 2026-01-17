@@ -19,6 +19,7 @@ from typing import Optional
 from datetime import datetime
 
 from jsling.core.status_poller import StatusPoller
+from jsling.core.submission_worker import SubmissionWorker
 from jsling.database.session import init_database
 from jsling.database.config import JSLING_HOME
 
@@ -63,6 +64,7 @@ class RunnerDaemon:
         self.pid_file = pid_file or get_pid_file()
         self.log_file = log_file or get_log_file()
         self.poller: Optional[StatusPoller] = None
+        self.submission_worker: Optional[SubmissionWorker] = None
         self._running = False
     
     def _setup_logging(self) -> None:
@@ -229,6 +231,13 @@ class RunnerDaemon:
         self.poller.start()
         logger.info("Unified status poller started (job + worker)")
         
+        # Start submission worker (handles queued job submissions)
+        self.submission_worker = SubmissionWorker(
+            worker_connections=self.poller._worker_connections  # Share connection pool
+        )
+        self.submission_worker.start()
+        logger.info("Submission worker started")
+        
         # Main loop
         self._running = True
         try:
@@ -244,6 +253,14 @@ class RunnerDaemon:
     def _shutdown(self) -> None:
         """Shutdown daemon gracefully."""
         logger.info("Shutting down daemon...")
+        
+        # Stop submission worker first
+        if self.submission_worker:
+            try:
+                self.submission_worker.stop()
+                logger.info("Submission worker stopped")
+            except Exception as e:
+                logger.error(f"Error stopping submission worker: {e}")
         
         # Stop unified status poller
         if self.poller:
@@ -334,6 +351,10 @@ class RunnerDaemon:
             stat = self.log_file.stat()
             status["log_size"] = stat.st_size
             status["log_modified"] = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        
+        # Get submission queue status if available
+        if self.submission_worker:
+            status["submission_queue"] = self.submission_worker.get_queue_status()
         
         return status
 

@@ -6,6 +6,7 @@ from rich.console import Console
 
 from jsling.database.session import get_db
 from jsling.core.job_manager import JobManager
+from jsling.core.runner_daemon import is_daemon_running
 from jsling.utils.job_config_parser import parse_job_config, merge_job_config
 
 console = Console()
@@ -75,9 +76,9 @@ def main(config_file, worker, ntasks, gres, gpus_per_task, local_workdir, upload
             console.print(f"[red]Failed to parse YAML configuration: {e}[/red]")
             return
         
-        # Submit job
-        console.print("[cyan]Submitting job...[/cyan]")
-        job_id = job_manager.submit_job(
+        # Submit job (queue for async submission by daemon)
+        console.print("[cyan]Queuing job for submission...[/cyan]")
+        job_id = job_manager.queue_job(
             worker_id=actual_worker,
             command=actual_command,
             local_workdir=actual_local_dir,
@@ -89,35 +90,43 @@ def main(config_file, worker, ntasks, gres, gpus_per_task, local_workdir, upload
             rsync_interval=actual_rsync_interval,
             sync_rules=actual_sync_rules
         )
-        
+                
         if not job_id:
-            console.print("[red]Job submission failed[/red]")
+            console.print("[red]Job queuing failed[/red]")
             return
-        
+                
         # Get job details
         job = job_manager.get_job(job_id)
         if not job:
             console.print("[red]Failed to retrieve job details[/red]")
             return
-        
+                
+        # Check if daemon is running
+        daemon_running = is_daemon_running()
+                
         # Display success information
-        console.print("[green]✓ Job submitted successfully![/green]\n")
+        console.print("[green]\u2713 Job queued successfully![/green]\n")
         console.print(f"[bold]Job ID:[/bold] {job.job_id}")
-        console.print(f"[bold]Slurm Job ID:[/bold] {job.slurm_job_id}")
+        console.print(f"[bold]Status:[/bold] {job.job_status}")
         console.print(f"[bold]Worker:[/bold] {job.worker_id}")
         console.print(f"[bold]Local Workdir:[/bold] {job.local_workdir}")
         console.print(f"[bold]Remote Workdir:[/bold] {job.remote_workdir}")
         console.print(f"[bold]Rsync Mode:[/bold] {job.rsync_mode}")
         if job.sync_rules:
             console.print(f"[bold]Sync Rules:[/bold] Configured (streaming enabled)")
-        
-        console.print("\n[green]File synchronization will start automatically when job begins running[/green]")
-        
+                
+        if daemon_running:
+            console.print("\n[green]Job will be submitted automatically by the runner daemon[/green]")
+        else:
+            console.print("\n[yellow]Warning: Runner daemon is not running![/yellow]")
+            console.print("[yellow]Start it with: jrunner start[/yellow]")
+                
         # Next steps
         console.print("\n[bold]Next steps:[/bold]")
-        console.print(f"  • Check status: [cyan]jqueue[/cyan]")
-        console.print(f"  • Sync status: [cyan]jqueue --sync[/cyan]")
-        console.print(f"  • Force sync files: [cyan]jsync {job_id}[/cyan]")
+        console.print(f"  \u2022 Check status: [cyan]jqueue[/cyan]")
+        console.print(f"  \u2022 View submission queue: [cyan]jqueue --pending[/cyan]")
+        if not daemon_running:
+            console.print(f"  \u2022 Start daemon: [cyan]jrunner start[/cyan]")
         
     finally:
         session.close()

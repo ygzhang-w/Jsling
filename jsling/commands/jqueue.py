@@ -25,7 +25,7 @@ def parse_filter(filter_values: Tuple[str, ...]) -> dict:
         Dictionary with 'worker_id' and 'status' keys
     """
     result = {'worker_id': None, 'status': None}
-    valid_statuses = ['pending', 'running', 'completed', 'failed', 'cancelled']
+    valid_statuses = ['queued', 'pending', 'running', 'completed', 'failed', 'cancelled', 'submission_failed']
     
     for fv in filter_values:
         if '=' not in fv:
@@ -51,13 +51,14 @@ def parse_filter(filter_values: Tuple[str, ...]) -> dict:
 @click.group(invoke_without_command=True, context_settings=CONTEXT_SETTINGS)
 @click.pass_context
 @click.option("--all", "-a", "show_all", is_flag=True, help="Show all jobs including previously displayed failed/cancelled jobs")
+@click.option("--pending", "-p", "show_pending", is_flag=True, help="Show only queued jobs waiting for submission")
 @click.option("--filter", "-f", "filters", multiple=True, 
               help="Filter jobs by key=value (e.g. -f worker=node1 -f status=running)")
 @click.option("--sync", "-S", is_flag=True, help="Manually sync job status (normally handled by runner daemon)")
 @click.option("--limit", "-n", type=int, help="Limit number of results")
 @click.option("--sort", type=click.Choice(['submit_time', 'job_id']), default='submit_time', 
               help="Sort by field")
-def main(ctx, show_all, filters, sync, limit, sort):
+def main(ctx, show_all, show_pending, filters, sync, limit, sort):
     """Query job queue status.
     
     By default, failed/cancelled jobs are shown only once. Use --all to show all jobs.
@@ -66,10 +67,21 @@ def main(ctx, show_all, filters, sync, limit, sort):
     Use --sync to manually trigger a status sync if needed.
     
     \b
+    Job statuses:
+      queued            - Waiting for daemon to submit to cluster
+      pending           - Submitted to Slurm, waiting for resources
+      running           - Currently executing on cluster
+      completed         - Finished successfully
+      failed            - Execution failed
+      cancelled         - Cancelled by user
+      submission_failed - Failed to submit to cluster
+    
+    \b
     Filter examples:
       jqueue -f worker=node1                      # Filter by worker ID
       jqueue -f status=running                    # Filter by status
       jqueue -f worker=node1 -f status=pending    # Combined filters
+      jqueue --pending                            # Show submission queue
     """
     if ctx.invoked_subcommand is None:
         # Main command - list jobs
@@ -94,18 +106,21 @@ def main(ctx, show_all, filters, sync, limit, sort):
             query = session.query(Job)
             
             # Apply filters
-            if worker_id:
+            if show_pending:
+                # Show only queued jobs (submission queue)
+                query = query.filter(Job.job_status == "queued")
+            elif worker_id:
                 query = query.filter(Job.worker_id == worker_id)
             if status_filter:
                 query = query.filter(Job.job_status == status_filter)
             
-            # If not showing all, exclude already-displayed failed/cancelled jobs
-            if not show_all and not status_filter:
-                # Show: pending, running, completed, 
-                # AND failed/cancelled that haven't been displayed yet (marked_for_deletion=False)
+            # If not showing all and no specific filter, apply default filtering
+            if not show_all and not status_filter and not show_pending:
+                # Show: queued, pending, running, completed, 
+                # AND failed/cancelled/submission_failed that haven't been displayed yet
                 query = query.filter(
-                    (Job.job_status.in_(['pending', 'running', 'completed'])) |
-                    ((Job.job_status.in_(['failed', 'cancelled'])) & (Job.marked_for_deletion == False))
+                    (Job.job_status.in_(['queued', 'pending', 'running', 'completed'])) |
+                    ((Job.job_status.in_(['failed', 'cancelled', 'submission_failed'])) & (Job.marked_for_deletion == False))
                 )
             
             # Apply sorting
@@ -163,8 +178,8 @@ def main(ctx, show_all, filters, sync, limit, sort):
                     duration
                 ])
                 
-                # Mark failed/cancelled as displayed (will be hidden in future default calls)
-                if job.job_status in ['failed', 'cancelled'] and not job.marked_for_deletion:
+                # Mark failed/cancelled/submission_failed as displayed
+                if job.job_status in ['failed', 'cancelled', 'submission_failed'] and not job.marked_for_deletion:
                     job.marked_for_deletion = True
                     newly_displayed_count += 1
             

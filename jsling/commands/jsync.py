@@ -125,7 +125,11 @@ def _sync_download(session: Session, job: Job) -> int:
     try:
         # Construct rsync command
         # Use rsync to download all files from remote_workdir to local_workdir
-        remote_path = f"{job.worker.username}@{job.worker.host}:{job.remote_workdir}/"
+        # Handle IPv6 addresses - they need to be wrapped in brackets for rsync
+        host = job.worker.host
+        if ':' in host:  # IPv6 address
+            host = f"[{host}]"
+        remote_path = f"{job.worker.username}@{host}:{job.remote_workdir}/"
         local_path = job.local_workdir
         
         # Build rsync command with options:
@@ -179,7 +183,12 @@ def _sync_upload(session: Session, job: Job) -> int:
     try:
         # Construct rsync command for upload
         local_path = f"{job.local_workdir}/"
-        remote_path = f"{job.worker.username}@{job.worker.host}:{job.remote_workdir}/"
+        
+        # Handle IPv6 addresses - they need to be wrapped in brackets for rsync
+        host = job.worker.host
+        if ':' in host:  # IPv6 address
+            host = f"[{host}]"
+        remote_path = f"{job.worker.username}@{host}:{job.remote_workdir}/"
         
         rsync_cmd = f"rsync -avz --progress {local_path} {remote_path}"
         

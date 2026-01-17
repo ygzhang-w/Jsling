@@ -23,6 +23,10 @@ _CONFIG_DEFAULTS = {
     "stream_retry_count": (lambda: str(config.STREAM_RETRY_COUNT), type(config.STREAM_RETRY_COUNT).__name__, "Number of retries for streaming sync"),
     "stream_retry_delay": (lambda: str(config.STREAM_RETRY_DELAY), type(config.STREAM_RETRY_DELAY).__name__, "Retry delay for streaming sync in seconds"),
     "worker_status_poll_interval": (lambda: str(config.WORKER_STATUS_POLL_INTERVAL), type(config.WORKER_STATUS_POLL_INTERVAL).__name__, "Worker status polling interval in seconds"),
+    "submission_poll_interval": (lambda: str(config.SUBMISSION_POLL_INTERVAL), type(config.SUBMISSION_POLL_INTERVAL).__name__, "Submission queue polling interval in seconds"),
+    "submission_max_concurrent": (lambda: str(config.SUBMISSION_MAX_CONCURRENT), type(config.SUBMISSION_MAX_CONCURRENT).__name__, "Maximum concurrent job submissions"),
+    "submission_retry_count": (lambda: str(config.SUBMISSION_RETRY_COUNT), type(config.SUBMISSION_RETRY_COUNT).__name__, "Number of retries for failed submissions"),
+    "submission_retry_delay": (lambda: str(config.SUBMISSION_RETRY_DELAY), type(config.SUBMISSION_RETRY_DELAY).__name__, "Delay between submission retries in seconds"),
 }
 
 def init_default_configs(session: Session) -> None:

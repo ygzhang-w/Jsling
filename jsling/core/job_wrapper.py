@@ -66,6 +66,10 @@ class JobWrapper:
             if self.gres:
                 directives.append(f"#SBATCH --gres={self.gres}")
             if self.gpus_per_task:
+                # --gpus-per-task requires --ntasks to be specified
+                # Calculate total ntasks: ntasks_per_node * nodes (default 1)
+                total_ntasks = self.ntasks_per_node * (self.nodes or 1)
+                directives.append(f"#SBATCH --ntasks={total_ntasks}")
                 directives.append(f"#SBATCH --gpus-per-task={self.gpus_per_task}")
         
         # Output and error logs (named with job_id for synchronization)

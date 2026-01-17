@@ -102,6 +102,8 @@ class TestJobWrapper:
         assert "#SBATCH --partition=gpu_queue" in directives
         assert "#SBATCH --ntasks-per-node=16" in directives
         assert "#SBATCH --gres=gpu:v100:2" in directives
+        # When gpus-per-task is used, --ntasks must also be specified
+        assert "#SBATCH --ntasks=16" in directives  # 16 ntasks_per_node * 1 node
         assert "#SBATCH --gpus-per-task=1" in directives
         assert "#SBATCH --output=" in directives
         assert "#SBATCH --error=" in directives

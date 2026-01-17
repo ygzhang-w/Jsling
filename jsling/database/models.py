@@ -110,6 +110,9 @@ class Job(Base):
     sync_rules: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON object for sync rules
     rsync_interval: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # rsync interval in seconds
     
+    # Submission queue support (for async submission via daemon)
+    submission_params: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON object for deferred submission params
+    
     # Indexes
     __table_args__ = (
         Index('idx_job_status', 'job_status'),

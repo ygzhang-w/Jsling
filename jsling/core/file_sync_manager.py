@@ -381,14 +381,18 @@ class FileSyncManager:
         
         try:
             # Build rsync command with proper SSH parameters
-            remote_path = f"{self.worker.username}@{self.worker.host}:{self.job.remote_workdir}/"
+            # Handle IPv6 addresses - they need to be wrapped in brackets for rsync
+            host = self.worker.host
+            if ':' in host:  # IPv6 address
+                host = f"[{host}]"
+            remote_path = f"{self.worker.username}@{host}:{self.job.remote_workdir}/"
             local_path = self.job.local_workdir
             
             # Build SSH command with port and key/password
             ssh_cmd = self._build_rsync_ssh_command()
             
-            # Exclude sentinel files, streaming files, and uploaded files
-            exclude_args = ['--exclude', '.jsling_status_*']
+            # Exclude sentinel files, streaming files, uploaded files, and job.sh
+            exclude_args = ['--exclude', '.jsling_status_*', '--exclude', 'job.sh']
             for stream_file in self.streaming_files:
                 exclude_args.extend(['--exclude', stream_file])
             # Exclude uploaded files to avoid overwriting local files
@@ -488,6 +492,10 @@ class FileSyncManager:
                 if entry.filename.startswith('.jsling_status_'):
                     continue
                 
+                # Skip job.sh (system-generated submission script)
+                if entry.filename == 'job.sh':
+                    continue
+                
                 # Skip streaming files (use relative path for accurate matching)
                 if rel_path in self.streaming_files:
                     continue
@@ -541,6 +549,10 @@ class FileSyncManager:
         """
         # Calculate relative path from remote workdir
         rel_path = os.path.relpath(remote_path, self.job.remote_workdir)
+        
+        # Skip job.sh (system-generated submission script)
+        if filename == 'job.sh':
+            return False
         
         # Skip uploaded files - they should not be synced back
         if self._is_uploaded_file(filename, rel_path):
@@ -618,7 +630,12 @@ class FileSyncManager:
         """Execute rsync to upload files to remote"""
         try:
             local_path = f"{self.job.local_workdir}/"
-            remote_path = f"{self.worker.username}@{self.worker.host}:{self.job.remote_workdir}/"
+            
+            # Handle IPv6 addresses - they need to be wrapped in brackets for rsync
+            host = self.worker.host
+            if ':' in host:  # IPv6 address
+                host = f"[{host}]"
+            remote_path = f"{self.worker.username}@{host}:{self.job.remote_workdir}/"
             
             # Build SSH command with port and key/password
             ssh_cmd = self._build_rsync_ssh_command()

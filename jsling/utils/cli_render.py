@@ -173,12 +173,13 @@ def get_status_color(status: str) -> str:
     
     # Job status colors
     job_colors = {
-        'pending': 'yellow',
-        'running': 'cyan',
-        'completed': 'green',
-        'failed': 'red',
-        'cancelled': 'dim',
-        
+        'queued': 'blue',           # Waiting for daemon to submit
+        'pending': 'yellow',        # Submitted to Slurm, waiting for resources
+        'running': 'cyan',          # Currently executing
+        'completed': 'green',       # Finished successfully
+        'failed': 'red',            # Execution failed
+        'cancelled': 'dim',         # Cancelled by user
+        'submission_failed': 'red bold',  # Failed to submit to cluster
     }
     
     # Worker status colors

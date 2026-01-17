@@ -26,3 +26,9 @@ RSYNC_INTERVAL: int = 60
 STREAM_RETRY_COUNT: int = 3
 STREAM_RETRY_DELAY: int = 5
 WORKER_STATUS_POLL_INTERVAL: int = 30
+
+# Submission worker configuration
+SUBMISSION_POLL_INTERVAL: int = 2  # Interval to check for queued jobs (seconds)
+SUBMISSION_MAX_CONCURRENT: int = 5  # Max concurrent job submissions
+SUBMISSION_RETRY_COUNT: int = 3  # Number of retries for failed submissions
+SUBMISSION_RETRY_DELAY: int = 10  # Delay between retries (seconds)

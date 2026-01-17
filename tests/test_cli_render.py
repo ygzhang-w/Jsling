@@ -58,12 +58,13 @@ class TestStatusColors:
     """Tests for status colorization functions."""
     
     @pytest.mark.parametrize("status,expected_color", [
+        ("queued", "blue"),
         ("pending", "yellow"),
         ("running", "cyan"),
         ("completed", "green"),
         ("failed", "red"),
         ("cancelled", "dim"),
-        ("unknown", "magenta"),
+        ("submission_failed", "red bold"),
         ("active", "green"),
         ("inactive", "dim"),
         ("down", "red"),

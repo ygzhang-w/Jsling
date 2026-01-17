@@ -1,6 +1,7 @@
 """Unit tests for job_manager module."""
 
 import json
+import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from jsling.database.models import Base, Worker, Job
+from jsling.database.models import Base, Worker, Job, Config
 from jsling.core.job_manager import JobManager
 
 
@@ -24,6 +25,16 @@ def temp_db_session():
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = SessionLocal()
+    
+    # Add required default_rsync_mode config for queue_job tests
+    config = Config(
+        config_key="default_rsync_mode",
+        config_value="periodic",
+        config_type="str",
+        description="Default rsync mode"
+    )
+    session.add(config)
+    session.commit()
     
     yield session
     
@@ -114,50 +125,110 @@ class TestJobManagerHelpers:
         assert len(set(job_ids)) == 100
 
 
-class TestJobManagerSubmit:
-    """Tests for JobManager.submit_job initial upload behavior"""
-
-    @patch("jsling.core.job_manager.JobManager._rsync_initial_upload")
-    @patch("jsling.core.job_manager.JobManager._prepare_local_upload_files")
-    @patch("jsling.core.job_manager.WorkerConnection")
-    def test_submit_job_uses_rsync_for_key_auth(
-        self,
-        mock_worker_conn,
-        mock_prepare_local_upload_files,
-        mock_rsync_initial_upload,
-        temp_db_session,
-        test_worker,
-    ):
-        """Ensure submit_job uses rsync path for key-auth workers."""
+class TestJobManagerQueueJob:
+    """Tests for JobManager.queue_job async submission."""
+    
+    def test_queue_job_creates_queued_status(self, temp_db_session, test_worker):
+        """Test that queue_job creates a job with 'queued' status."""
         job_mgr = JobManager(temp_db_session)
-
-        # Configure worker to use key auth (already set in fixture)
-        assert test_worker.auth_method == "key"
-
-        # Mock worker connection and SSH client
-        mock_ssh_client = MagicMock()
-        mock_ssh_client.run.return_value = MagicMock(ok=True, stdout="Submitted batch job 123456")
-        mock_worker_conn.return_value.ssh_client = mock_ssh_client
-
-        # Prepare helpers
-        mock_prepare_local_upload_files.return_value = (["/path/to/file.txt"], [])
-        mock_rsync_initial_upload.return_value = True
-
-        # Call submit_job with explicit rsync_mode to avoid DB config lookup
-        job_id = job_mgr.submit_job(
+        
+        job_id = job_mgr.queue_job(
             worker_id=test_worker.worker_id,
-            command="echo test",
-            local_workdir="/tmp",
-            upload_files=["/path/to/file.txt"],
-            rsync_mode="final_only",
+            command="echo 'Hello World'",
+            local_workdir="/tmp/test",
+            rsync_mode="periodic"
         )
-
+        
         assert job_id is not None
-        mock_rsync_initial_upload.assert_called_once()
-
-        # Verify job record stored uploaded_files correctly
         job = temp_db_session.query(Job).filter(Job.job_id == job_id).first()
         assert job is not None
-        if job.uploaded_files:
-            uploaded_list = json.loads(job.uploaded_files)
-            assert "/path/to/file.txt" in uploaded_list
+        assert job.job_status == "queued"
+        assert job.slurm_job_id is None  # Not submitted yet
+    
+    def test_queue_job_stores_submission_params(self, temp_db_session, test_worker):
+        """Test that queue_job stores submission parameters as JSON with absolute paths."""
+        job_mgr = JobManager(temp_db_session)
+        
+        job_id = job_mgr.queue_job(
+            worker_id=test_worker.worker_id,
+            command="python train.py",
+            local_workdir="/tmp/test",
+            ntasks_per_node=8,
+            gres="gpu:2",
+            gpus_per_task=1,
+            upload_files=["data.csv", "config.yaml"],
+            rsync_mode="final_only"
+        )
+        
+        assert job_id is not None
+        job = temp_db_session.query(Job).filter(Job.job_id == job_id).first()
+        assert job.submission_params is not None
+        
+        params = json.loads(job.submission_params)
+        assert params["command"] == "python train.py"
+        assert params["ntasks_per_node"] == 8
+        assert params["gres"] == "gpu:2"
+        assert params["gpus_per_task"] == 1
+        # Upload files should be converted to absolute paths
+        assert len(params["upload_files"]) == 2
+        for path in params["upload_files"]:
+            assert os.path.isabs(path)  # Verify paths are absolute
+    
+    def test_queue_job_validates_worker_exists(self, temp_db_session):
+        """Test that queue_job fails for non-existent worker."""
+        job_mgr = JobManager(temp_db_session)
+        
+        job_id = job_mgr.queue_job(
+            worker_id="nonexistent_worker",
+            command="echo test",
+            rsync_mode="periodic"
+        )
+        
+        assert job_id is None
+    
+    def test_queue_job_validates_worker_active(self, temp_db_session, test_worker):
+        """Test that queue_job fails for inactive worker."""
+        # Deactivate worker
+        test_worker.is_active = False
+        temp_db_session.commit()
+        
+        job_mgr = JobManager(temp_db_session)
+        
+        job_id = job_mgr.queue_job(
+            worker_id=test_worker.worker_id,
+            command="echo test",
+            rsync_mode="periodic"
+        )
+        
+        assert job_id is None
+    
+    def test_queue_job_returns_immediately(self, temp_db_session, test_worker):
+        """Test that queue_job returns quickly without blocking."""
+        job_mgr = JobManager(temp_db_session)
+        
+        import time
+        start = time.time()
+        job_id = job_mgr.queue_job(
+            worker_id=test_worker.worker_id,
+            command="sleep 60",  # Long running command
+            rsync_mode="periodic"
+        )
+        elapsed = time.time() - start
+        
+        # Should complete in under 1 second (no SSH/rsync/sbatch)
+        assert elapsed < 1.0
+        assert job_id is not None
+    
+    def test_queue_job_uses_default_rsync_mode(self, temp_db_session, test_worker):
+        """Test that queue_job uses default rsync_mode from config."""
+        job_mgr = JobManager(temp_db_session)
+        
+        # Don't specify rsync_mode, should use database default
+        job_id = job_mgr.queue_job(
+            worker_id=test_worker.worker_id,
+            command="echo test"
+        )
+        
+        assert job_id is not None
+        job = temp_db_session.query(Job).filter(Job.job_id == job_id).first()
+        assert job.rsync_mode == "periodic"  # Default from fixture
