@@ -371,3 +371,147 @@ class TestJobDisappearedFromQueue:
         temp_db.refresh(job)
         assert job.job_status == "completed"
         assert job.exit_code == 0
+
+
+class TestCancellingStatusHandling:
+    """Test that cancelling jobs are handled correctly by the status poller.
+    
+    These tests verify the fix for the bug where cancelling jobs were:
+    1. Being included in the polling loop
+    2. Having their status overwritten from squeue results
+    """
+    
+    def test_cancelling_job_excluded_from_poll_query(self, temp_db, mock_worker):
+        """Test that jobs with 'cancelling' status are not included in _poll_all_jobs query."""
+        from jsling.database.models import Job
+        
+        # Create a running job
+        running_job = Job(
+            job_id="test_running_job",
+            worker_id=mock_worker.worker_id,
+            job_status="running",
+            local_workdir="/tmp/local",
+            remote_workdir="/tmp/remote",
+            script_path="/tmp/script.sh",
+            sync_mode="sentinel",
+            slurm_job_id="11111"
+        )
+        
+        # Create a cancelling job
+        cancelling_job = Job(
+            job_id="test_cancelling_job",
+            worker_id=mock_worker.worker_id,
+            job_status="cancelling",
+            local_workdir="/tmp/local",
+            remote_workdir="/tmp/remote",
+            script_path="/tmp/script.sh",
+            sync_mode="sentinel",
+            slurm_job_id="22222"
+        )
+        
+        temp_db.add(running_job)
+        temp_db.add(cancelling_job)
+        temp_db.commit()
+        
+        poller = StatusPoller(session=temp_db, poll_interval=5)
+        
+        # Mock connection to avoid actual SSH calls
+        mock_worker_conn = MagicMock()
+        mock_ssh = MagicMock()
+        mock_result = MagicMock()
+        mock_result.ok = False
+        mock_result.stdout = ""
+        mock_ssh.run.return_value = mock_result
+        mock_worker_conn.ssh_client = mock_ssh
+        
+        polled_jobs = []
+        original_poll_job_status = poller._poll_job_status
+        
+        def mock_poll_job_status(session, job):
+            polled_jobs.append(job.job_id)
+            # Don't actually poll, just track which jobs were polled
+        
+        with patch.object(poller, '_poll_job_status', mock_poll_job_status):
+            with patch.object(poller, '_get_worker_connection', return_value=mock_worker_conn):
+                poller._poll_all_jobs()
+        
+        # Only the running job should be polled, not the cancelling job
+        assert "test_running_job" in polled_jobs
+        assert "test_cancelling_job" not in polled_jobs
+    
+    def test_cancelling_status_not_overwritten_by_squeue(self, temp_db, mock_worker):
+        """Test that _poll_job_status returns early for cancelling jobs."""
+        from jsling.database.models import Job
+        
+        # Create a cancelling job (simulating jcancel was called)
+        job = Job(
+            job_id="test_cancel_preserve",
+            worker_id=mock_worker.worker_id,
+            job_status="cancelling",
+            local_workdir="/tmp/local",
+            remote_workdir="/tmp/remote",
+            script_path="/tmp/script.sh",
+            sync_mode="sentinel",
+            slurm_job_id="33333"
+        )
+        temp_db.add(job)
+        temp_db.commit()
+        
+        poller = StatusPoller(session=temp_db, poll_interval=5)
+        
+        # Mock SSH client that would return RUNNING from squeue
+        mock_ssh = MagicMock()
+        
+        def mock_run(cmd, **kwargs):
+            result = MagicMock()
+            if "squeue" in cmd:
+                result.ok = True
+                result.stdout = "RUNNING"
+            else:
+                result.ok = False
+                result.stdout = ""
+            return result
+        
+        mock_ssh.run.side_effect = mock_run
+        
+        mock_worker_conn = MagicMock()
+        mock_worker_conn.ssh_client = mock_ssh
+        
+        with patch.object(poller, '_get_worker_connection', return_value=mock_worker_conn):
+            # Call _poll_job_status directly on the cancelling job
+            poller._poll_job_status(temp_db, job)
+        
+        # Status should remain 'cancelling', not overwritten to 'running'
+        temp_db.refresh(job)
+        assert job.job_status == "cancelling"
+    
+    def test_cancelling_job_visible_in_non_terminal_query(self, temp_db, mock_worker):
+        """Test that cancelling jobs would still appear in queries that don't exclude them.
+        
+        This ensures jqueue can still show cancelling jobs.
+        """
+        from jsling.database.models import Job
+        
+        # Create a cancelling job
+        job = Job(
+            job_id="test_visible_cancelling",
+            worker_id=mock_worker.worker_id,
+            job_status="cancelling",
+            local_workdir="/tmp/local",
+            remote_workdir="/tmp/remote",
+            script_path="/tmp/script.sh",
+            sync_mode="sentinel",
+            slurm_job_id="44444"
+        )
+        temp_db.add(job)
+        temp_db.commit()
+        
+        # Query without excluding cancelling (like jqueue would do)
+        visible_jobs = temp_db.query(Job).filter(
+            ~Job.job_status.in_(["completed", "failed", "cancelled"])
+        ).all()
+        
+        # The cancelling job should be visible
+        job_ids = [j.job_id for j in visible_jobs]
+        assert "test_visible_cancelling" in job_ids
+

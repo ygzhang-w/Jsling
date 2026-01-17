@@ -19,7 +19,7 @@ from typing import Optional
 from datetime import datetime
 
 from jsling.core.status_poller import StatusPoller
-from jsling.core.submission_worker import SubmissionWorker
+from jsling.core.status_worker import StatusWorker
 from jsling.database.session import init_database
 from jsling.database.config import JSLING_HOME
 
@@ -64,7 +64,7 @@ class RunnerDaemon:
         self.pid_file = pid_file or get_pid_file()
         self.log_file = log_file or get_log_file()
         self.poller: Optional[StatusPoller] = None
-        self.submission_worker: Optional[SubmissionWorker] = None
+        self.status_worker: Optional[StatusWorker] = None
         self._running = False
     
     def _setup_logging(self) -> None:
@@ -231,12 +231,12 @@ class RunnerDaemon:
         self.poller.start()
         logger.info("Unified status poller started (job + worker)")
         
-        # Start submission worker (handles queued job submissions)
-        self.submission_worker = SubmissionWorker(
+        # Start status worker (handles queued job submissions and cancellation requests)
+        self.status_worker = StatusWorker(
             worker_connections=self.poller._worker_connections  # Share connection pool
         )
-        self.submission_worker.start()
-        logger.info("Submission worker started")
+        self.status_worker.start()
+        logger.info("Status worker started")
         
         # Main loop
         self._running = True
@@ -254,13 +254,13 @@ class RunnerDaemon:
         """Shutdown daemon gracefully."""
         logger.info("Shutting down daemon...")
         
-        # Stop submission worker first
-        if self.submission_worker:
+        # Stop status worker first
+        if self.status_worker:
             try:
-                self.submission_worker.stop()
-                logger.info("Submission worker stopped")
+                self.status_worker.stop()
+                logger.info("Status worker stopped")
             except Exception as e:
-                logger.error(f"Error stopping submission worker: {e}")
+                logger.error(f"Error stopping status worker: {e}")
         
         # Stop unified status poller
         if self.poller:
@@ -352,9 +352,9 @@ class RunnerDaemon:
             status["log_size"] = stat.st_size
             status["log_modified"] = datetime.fromtimestamp(stat.st_mtime).isoformat()
         
-        # Get submission queue status if available
-        if self.submission_worker:
-            status["submission_queue"] = self.submission_worker.get_queue_status()
+        # Get status queue status if available
+        if self.status_worker:
+            status["status_queue"] = self.status_worker.get_queue_status()
         
         return status
 

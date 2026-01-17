@@ -336,6 +336,49 @@ class JobManager:
         
         return synced
     
+    def queue_cancel_job(self, job_id: str) -> bool:
+        """Queue a job for asynchronous cancellation by the daemon.
+        
+        This method updates the job status and returns immediately.
+        The actual scancel command is executed by StatusWorker in the daemon.
+        
+        For 'queued' jobs (not yet submitted to Slurm), the job is directly
+        set to 'cancelled' since no remote operation is needed.
+        
+        Args:
+            job_id: Job identifier to cancel
+            
+        Returns:
+            True if the cancellation was queued successfully, False otherwise
+        """
+        job = self.get_job(job_id)
+        if not job:
+            return False
+        
+        # Can't cancel jobs in terminal states
+        if job.job_status in ["completed", "failed", "cancelled", "submission_failed"]:
+            return False
+        
+        # Can't cancel jobs already being cancelled
+        if job.job_status == "cancelling":
+            return True  # Already being cancelled
+        
+        try:
+            if job.job_status == "queued":
+                # Job not yet submitted to Slurm - cancel directly
+                job.job_status = "cancelled"
+                job.end_time = datetime.now()
+            else:
+                # Job is pending/running on Slurm - queue for async cancellation
+                job.job_status = "cancelling"
+            
+            self.session.commit()
+            return True
+            
+        except Exception:
+            self.session.rollback()
+            return False
+    
     def cancel_job(self, job_id: str) -> bool:
         """Cancel a running job on the remote worker via SLURM.
 

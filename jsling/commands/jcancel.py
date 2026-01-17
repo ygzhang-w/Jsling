@@ -5,6 +5,7 @@ from rich.console import Console
 
 from jsling.database.session import get_db
 from jsling.core.job_manager import JobManager
+from jsling.core.runner_daemon import is_daemon_running
 
 console = Console()
 
@@ -45,8 +46,12 @@ def main(job_ids):
                 console.print(f"[yellow]Warning: Job not found: {job_id}[/yellow]")
                 continue
             
-            if job.job_status in ["completed", "failed", "cancelled"]:
+            if job.job_status in ["completed", "failed", "cancelled", "submission_failed"]:
                 console.print(f"[yellow]Warning: Job {job.job_id} already in terminal state: {job.job_status}[/yellow]")
+                continue
+            
+            if job.job_status == "cancelling":
+                console.print(f"[yellow]Warning: Job {job.job_id} is already being cancelled[/yellow]")
                 continue
             
             jobs_to_cancel.append(job)
@@ -58,22 +63,28 @@ def main(job_ids):
         # Show jobs to be cancelled
         console.print(f"\n[bold]Jobs to cancel ({len(jobs_to_cancel)}):[/bold]")
         for job in jobs_to_cancel:
-            console.print(f"  - {job.job_id} (Slurm: {job.slurm_job_id}, Status: {job.job_status})")
+            slurm_id = job.slurm_job_id or "N/A"
+            console.print(f"  - {job.job_id} (Slurm: {slurm_id}, Status: {job.job_status})")
         
-        # Cancel jobs
+        # Queue cancellations
         console.print()
         success_count = 0
         fail_count = 0
+        queued_count = 0
         
         for job in jobs_to_cancel:
             try:
-                result = job_manager.cancel_job(job.job_id)
+                was_queued = job.job_status == "queued"
+                result = job_manager.queue_cancel_job(job.job_id)
                 if result:
-                    console.print(f"[green]✓ Cancelled: {job.job_id}[/green]")
-                    success_count += 1
+                    if was_queued:
+                        console.print(f"[green]✓ Cancelled: {job.job_id}[/green]")
+                        success_count += 1
+                    else:
+                        console.print(f"[cyan]⏳ Queued for cancellation: {job.job_id}[/cyan]")
+                        queued_count += 1
                 else:
-                    # Cancel failed - status will be updated by runner daemon
-                    console.print(f"[yellow]⚠ Failed to cancel {job.job_id} (job may have already finished)[/yellow]")
+                    console.print(f"[yellow]⚠ Failed to queue cancellation for {job.job_id}[/yellow]")
                     fail_count += 1
             except Exception as e:
                 console.print(f"[red]✗ Error cancelling {job.job_id}: {str(e)}[/red]")
@@ -83,6 +94,15 @@ def main(job_ids):
         console.print()
         if success_count > 0:
             console.print(f"[green]Successfully cancelled {success_count} job(s)[/green]")
+        if queued_count > 0:
+            console.print(f"[cyan]Queued {queued_count} job(s) for cancellation[/cyan]")
+            # Check daemon status
+            daemon_running = is_daemon_running()
+            if daemon_running:
+                console.print("[green]Runner daemon will process cancellations shortly[/green]")
+            else:
+                console.print("[yellow]Warning: Runner daemon is not running![/yellow]")
+                console.print("[yellow]Start it with: jrunner start[/yellow]")
         if fail_count > 0:
             console.print(f"[yellow]Failed to cancel {fail_count} job(s)[/yellow]")
     
@@ -92,3 +112,4 @@ def main(job_ids):
 
 if __name__ == "__main__":
     main()
+

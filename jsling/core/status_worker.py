@@ -1,10 +1,12 @@
 """
-Submission Worker - Background job submission processor.
+Status Worker - Background job submission and cancellation processor.
 
-This module provides asynchronous job submission capability, enabling
-high-throughput job submission without blocking the CLI.
+This module provides asynchronous job submission and cancellation capability,
+enabling high-throughput operations without blocking the CLI.
 
-Jobs are queued locally and submitted to remote workers by the daemon.
+Jobs are queued locally and processed by the daemon:
+- Submission: queued -> pending (via sbatch)
+- Cancellation: cancelling -> cancelled (via scancel)
 """
 
 import json
@@ -30,15 +32,15 @@ from jsling.database.session import get_db
 logger = logging.getLogger(__name__)
 
 
-class SubmissionWorker:
+class StatusWorker:
     """
-    Background worker for processing job submission queue.
+    Background worker for processing job submission and cancellation queues.
     
     Features:
-    - Polls database for 'queued' jobs
-    - Executes remote submission (SSH + rsync + sbatch)
+    - Polls database for 'queued' jobs (submission) and 'cancelling' jobs (cancel)
+    - Executes remote operations (SSH + rsync + sbatch/scancel)
     - Reuses SSH connection pool from StatusPoller
-    - Handles submission failures with retry logic
+    - Handles failures with retry logic
     - Configurable concurrency and retry settings
     """
     
@@ -50,7 +52,7 @@ class SubmissionWorker:
         max_concurrent: Optional[int] = None
     ):
         """
-        Initialize submission worker.
+        Initialize status worker.
         
         Args:
             session: Database session (optional, creates new if not provided)
@@ -93,7 +95,7 @@ class SubmissionWorker:
         self._active_submissions: Dict[str, threading.Thread] = {}
         
         logger.info(
-            f"SubmissionWorker initialized with poll_interval={self.poll_interval}s, "
+            f"StatusWorker initialized with poll_interval={self.poll_interval}s, "
             f"max_concurrent={self.max_concurrent}"
         )
     
@@ -113,24 +115,24 @@ class SubmissionWorker:
         """
         with self._lock:
             if self._running:
-                logger.warning("Submission worker already running")
+                logger.warning("Status worker already running")
                 return True
             
             self._running = True
             
             self._thread = threading.Thread(
-                target=self._submission_loop,
+                target=self._worker_loop,
                 daemon=True,
-                name="SubmissionWorker"
+                name="StatusWorker"
             )
             self._thread.start()
             
-            logger.info("Submission worker started")
+            logger.info("Status worker started")
         
         return True
     
     def stop(self) -> None:
-        """Stop submission worker."""
+        """Stop status worker."""
         with self._lock:
             if not self._running:
                 return
@@ -147,22 +149,23 @@ class SubmissionWorker:
             thread.join(timeout=30)
         self._active_submissions.clear()
         
-        logger.info("Submission worker stopped")
+        logger.info("Status worker stopped")
     
     def is_running(self) -> bool:
-        """Check if submission worker is running."""
+        """Check if status worker is running."""
         return self._running
     
-    def _submission_loop(self) -> None:
-        """Main loop for processing queued jobs."""
+    def _worker_loop(self) -> None:
+        """Main loop for processing queued and cancellation-requested jobs."""
         # Initial delay to let system stabilize
         time.sleep(2)
         
         while self._running:
             try:
                 self._process_queued_jobs()
+                self._process_cancellation_requests()
             except Exception as e:
-                logger.error(f"Error in submission loop: {e}")
+                logger.error(f"Error in worker loop: {e}")
             
             # Wait for next poll interval
             for _ in range(self.poll_interval):
@@ -562,7 +565,7 @@ class SubmissionWorker:
         return None
     
     def get_queue_status(self) -> Dict[str, Any]:
-        """Get current submission queue status.
+        """Get current queue status for both submissions and cancellations.
         
         Returns:
             Dictionary with queue statistics
@@ -573,12 +576,17 @@ class SubmissionWorker:
                 Job.job_status == "queued"
             ).count()
             
+            cancelling_count = session.query(Job).filter(
+                Job.job_status == "cancelling"
+            ).count()
+            
             failed_count = session.query(Job).filter(
                 Job.job_status == "submission_failed"
             ).count()
             
             return {
                 "queued": queued_count,
+                "cancelling": cancelling_count,
                 "active_submissions": len(self._active_submissions),
                 "submission_failed": failed_count,
                 "max_concurrent": self.max_concurrent,
@@ -587,3 +595,123 @@ class SubmissionWorker:
         finally:
             if self.session is None:
                 session.close()
+    
+    def _process_cancellation_requests(self) -> None:
+        """Process all jobs in cancelling state."""
+        try:
+            # Get database session
+            if self.session is not None:
+                session = self.session
+                should_close = False
+            else:
+                session = get_db()
+                should_close = True
+            
+            try:
+                # Find jobs requesting cancellation
+                jobs_to_cancel = session.query(Job).filter(
+                    Job.job_status == "cancelling"
+                ).order_by(Job.submit_time).all()
+                
+                if not jobs_to_cancel:
+                    return
+                
+                logger.debug(f"Found {len(jobs_to_cancel)} jobs to cancel")
+                
+                for job in jobs_to_cancel:
+                    try:
+                        success = self._cancel_single_job(session, job)
+                        if success:
+                            logger.info(f"Job {job.job_id} cancelled successfully")
+                        else:
+                            logger.warning(f"Failed to cancel job {job.job_id}")
+                    except Exception as e:
+                        logger.error(f"Error cancelling job {job.job_id}: {e}")
+                        # Mark as cancelled anyway since we can't reach the cluster
+                        job.job_status = "cancelled"
+                        job.end_time = datetime.now()
+                        job.error_message = f"Cancellation error: {str(e)[:400]}"
+                        session.commit()
+                
+            finally:
+                if should_close:
+                    session.close()
+                    
+        except Exception as e:
+            logger.error(f"Error in _process_cancellation_requests: {e}")
+    
+    def _cancel_single_job(self, session: Session, job: Job) -> bool:
+        """Execute scancel for a single job.
+        
+        Args:
+            session: Database session
+            job: Job to cancel
+            
+        Returns:
+            True if cancellation successful
+        """
+        # Get worker
+        worker = session.query(Worker).filter(
+            Worker.worker_id == job.worker_id
+        ).first()
+        
+        if not worker:
+            job.job_status = "cancelled"
+            job.end_time = datetime.now()
+            job.error_message = f"Worker not found: {job.worker_id}"
+            session.commit()
+            return False
+        
+        if not worker.is_active:
+            job.job_status = "cancelled"
+            job.end_time = datetime.now()
+            job.error_message = f"Worker is not active: {worker.worker_name}"
+            session.commit()
+            return False
+        
+        # Get or create worker connection
+        worker_conn = self._get_worker_connection(worker)
+        if not worker_conn:
+            job.job_status = "cancelled"
+            job.end_time = datetime.now()
+            job.error_message = f"Failed to connect to worker {worker.worker_id}"
+            session.commit()
+            return False
+        
+        # Execute scancel
+        try:
+            if job.slurm_job_id:
+                result = worker_conn.ssh_client.run(
+                    f"scancel {job.slurm_job_id}", 
+                    hide=True, 
+                    warn=True
+                )
+                
+                if result.ok:
+                    job.job_status = "cancelled"
+                    job.end_time = datetime.now()
+                    session.commit()
+                    return True
+                else:
+                    # scancel failed - job might have already finished
+                    logger.warning(f"scancel failed for job {job.job_id}: {result.stderr}")
+                    job.job_status = "cancelled"
+                    job.end_time = datetime.now()
+                    job.error_message = f"scancel failed: {result.stderr[:200] if result.stderr else 'unknown error'}"
+                    session.commit()
+                    return False
+            else:
+                # No slurm_job_id - job was never actually submitted
+                job.job_status = "cancelled"
+                job.end_time = datetime.now()
+                session.commit()
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error executing scancel for job {job.job_id}: {e}")
+            job.job_status = "cancelled"
+            job.end_time = datetime.now()
+            job.error_message = f"scancel error: {str(e)[:400]}"
+            session.commit()
+            return False
+

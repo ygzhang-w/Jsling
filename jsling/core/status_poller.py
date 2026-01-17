@@ -261,9 +261,9 @@ class StatusPoller:
                 should_close = True
             
             try:
-                # Find all non-terminal jobs
+                # Find all non-terminal jobs (exclude cancelling - handled by StatusWorker)
                 jobs = session.query(Job).filter(
-                    ~Job.job_status.in_(["completed", "failed", "cancelled"])
+                    ~Job.job_status.in_(["completed", "failed", "cancelled", "cancelling"])
                 ).all()
                 
                 # Clean up sync managers for jobs terminated externally (e.g., via CLI cancel)
@@ -334,6 +334,10 @@ class StatusPoller:
             session: Database session
             job: Job to poll
         """
+        # Do not poll jobs that are pending cancellation - let StatusWorker handle them
+        if job.job_status == "cancelling":
+            return
+        
         # Get worker connection
         worker = job.worker
         if not worker:

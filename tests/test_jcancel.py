@@ -128,10 +128,10 @@ class TestJCancelCommand:
     @patch('jsling.commands.jcancel.get_db')
     @patch('jsling.core.job_manager.WorkerConnection')
     def test_cancel_pending_job_success(self, mock_worker_conn, mock_get_db, temp_db, sample_job):
-        """Test successful cancellation of pending job."""
+        """Test successful queueing of pending job for cancellation."""
         mock_get_db.return_value = temp_db
         
-        # Mock SSH client for scancel
+        # Mock SSH client (not actually used for pending jobs with async cancel)
         mock_ssh = MagicMock()
         mock_ssh.run.return_value = MagicMock(ok=True, stdout="")
         mock_worker_conn.return_value.ssh_client = mock_ssh
@@ -140,20 +140,21 @@ class TestJCancelCommand:
         runner = CliRunner()
         result = runner.invoke(main, [job_id])
         
-        assert "Cancelled" in result.output
-        assert "Successfully cancelled 1 job" in result.output
+        # Pending/running jobs are now queued for async cancellation
+        assert "Queued for cancellation" in result.output
+        assert "Queued 1 job(s) for cancellation" in result.output
         
-        # Verify job status updated by querying DB
+        # Verify job status is set to cancelling (daemon will complete the cancellation)
         updated_job = temp_db.query(Job).filter(Job.job_id == job_id).first()
-        assert updated_job.job_status == "cancelled"
+        assert updated_job.job_status == "cancelling"
     
     @patch('jsling.commands.jcancel.get_db')
     @patch('jsling.core.job_manager.WorkerConnection')
     def test_cancel_running_job_success(self, mock_worker_conn, mock_get_db, temp_db, running_job):
-        """Test successful cancellation of running job."""
+        """Test successful queueing of running job for cancellation."""
         mock_get_db.return_value = temp_db
         
-        # Mock SSH client for scancel
+        # Mock SSH client (not actually used for async cancel)
         mock_ssh = MagicMock()
         mock_ssh.run.return_value = MagicMock(ok=True, stdout="")
         mock_worker_conn.return_value.ssh_client = mock_ssh
@@ -162,12 +163,13 @@ class TestJCancelCommand:
         runner = CliRunner()
         result = runner.invoke(main, [job_id])
         
-        assert "Cancelled" in result.output
-        assert "Successfully cancelled 1 job" in result.output
+        # Running jobs are now queued for async cancellation
+        assert "Queued for cancellation" in result.output
+        assert "Queued 1 job(s) for cancellation" in result.output
         
-        # Verify job status updated by querying DB
+        # Verify job status is set to cancelling
         updated_job = temp_db.query(Job).filter(Job.job_id == job_id).first()
-        assert updated_job.job_status == "cancelled"
+        assert updated_job.job_status == "cancelling"
     
     @patch('jsling.commands.jcancel.get_db')
     @patch('jsling.core.job_manager.WorkerConnection')
@@ -186,11 +188,11 @@ class TestJCancelCommand:
         # Use slurm_job_id instead of job_id
         result = runner.invoke(main, [slurm_id])
         
-        assert "Cancelled" in result.output
+        assert "Queued for cancellation" in result.output
         
-        # Verify job status updated by querying DB
+        # Verify job status is set to cancelling
         updated_job = temp_db.query(Job).filter(Job.job_id == job_id).first()
-        assert updated_job.job_status == "cancelled"
+        assert updated_job.job_status == "cancelling"
     
     @patch('jsling.commands.jcancel.get_db')
     @patch('jsling.core.job_manager.WorkerConnection')
@@ -208,31 +210,26 @@ class TestJCancelCommand:
         runner = CliRunner()
         result = runner.invoke(main, [job_id1, job_id2])
         
-        assert "Successfully cancelled 2 job" in result.output
+        assert "Queued 2 job(s) for cancellation" in result.output
         
-        # Verify both jobs are cancelled by querying DB
+        # Verify both jobs are set to cancelling
         updated_job1 = temp_db.query(Job).filter(Job.job_id == job_id1).first()
         updated_job2 = temp_db.query(Job).filter(Job.job_id == job_id2).first()
-        assert updated_job1.job_status == "cancelled"
-        assert updated_job2.job_status == "cancelled"
+        assert updated_job1.job_status == "cancelling"
+        assert updated_job2.job_status == "cancelling"
     
     @patch('jsling.commands.jcancel.get_db')
-    @patch('jsling.core.job_manager.WorkerConnection')
-    def test_cancel_job_scancel_fails(self, mock_worker_conn, mock_get_db, temp_db, sample_job):
-        """Test cancellation when scancel fails."""
+    def test_cancel_job_queued_for_async_processing(self, mock_get_db, temp_db, sample_job):
+        """Test that pending jobs are queued for async cancellation (no immediate scancel)."""
         mock_get_db.return_value = temp_db
-        
-        # Mock SSH client for scancel failure
-        mock_ssh = MagicMock()
-        mock_ssh.run.return_value = MagicMock(ok=False, stderr="scancel: error")
-        mock_worker_conn.return_value.ssh_client = mock_ssh
         
         job_id = sample_job.job_id
         runner = CliRunner()
         result = runner.invoke(main, [job_id])
         
-        # Should show failure message (no sync triggered - relies on runner daemon)
-        assert "Failed to cancel" in result.output
+        # Cancellation is now async - job is queued, not immediately cancelled
+        assert "Queued for cancellation" in result.output
+        assert "Runner daemon will process cancellations shortly" in result.output
 
 
 class TestJCancelHelp:
